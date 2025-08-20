@@ -1,6 +1,7 @@
 package dao
 
 import (
+	"MyChat/common"
 	"MyChat/global"
 	"MyChat/models"
 	"errors"
