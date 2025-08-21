@@ -57,7 +57,7 @@ func AddFriend(userId, TargetId uint) (int, error) {
 	// start transaction
 	tx := global.DB.Begin()
 
-	relation.OwerId = userId
+	relation.OwnerId = userId
 	relation.TargetId = targetUser.ID
 	relation.Type = 1
 
@@ -70,7 +70,7 @@ func AddFriend(userId, TargetId uint) (int, error) {
 	}
 
 	relation = models.Relation{}
-	relation.OwerId = targetUser.ID
+	relation.OwnerId = targetUser.ID
 	relation.TargetId = userId
 	relation.Type = 1
 

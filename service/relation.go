@@ -3,6 +3,7 @@ package service
 import (
 	"MyChat/common"
 	"MyChat/dao"
+	"MyChat/models"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -96,4 +97,130 @@ func HandleErr(code int, ctx *gin.Context, err error) {
 		})
 
 	}
+}
+
+// NewGroup 新建群聊
+func NewGroup(ctx *gin.Context) {
+	owner := ctx.PostForm("ownerId")
+	ownerId, err := strconv.Atoi(owner)
+	if err != nil {
+		zap.S().Info("owner类型转换失败", err)
+		return
+	}
+
+	ty := ctx.PostForm("cate")
+	Type, err := strconv.Atoi(ty)
+	if err != nil {
+		zap.S().Info("ty类型转换失败", err)
+		return
+	}
+
+	img := ctx.PostForm("icon")
+	name := ctx.PostForm("name")
+	desc := ctx.PostForm("desc")
+
+	community := models.Community{}
+	if ownerId == 0 {
+		ctx.JSON(200, gin.H{
+			"code":    -1, //  0成功   -1失败
+			"message": "您未登录",
+		})
+		return
+	}
+
+	if name == "" {
+		ctx.JSON(200, gin.H{
+			"code":    -1, //  0成功   -1失败
+			"message": "群名称不能为空",
+		})
+		return
+	}
+
+	if img != "" {
+		community.Image = img
+	}
+	if desc != "" {
+		community.Desc = desc
+	}
+
+	community.Name = name
+	community.Type = Type
+	community.OwnerId = uint(ownerId)
+
+	code, err := dao.CreateCommunity(community)
+	if err != nil {
+		HandleErr(code, ctx, err)
+		return
+	}
+
+	ctx.JSON(200, gin.H{
+		"code":    0, //  0成功   -1失败
+		"message": "建群成功",
+	})
+}
+
+// GroupList 获取群列表
+func GroupList(ctx *gin.Context) {
+	owner := ctx.PostForm("ownerId")
+	ownerId, err := strconv.Atoi(owner)
+	if err != nil {
+		zap.S().Info("owner类型转换失败", err)
+		return
+	}
+
+	if ownerId == 0 {
+		ctx.JSON(200, gin.H{
+			"code":    -1, //  0成功   -1失败
+			"message": "您未登录",
+		})
+		return
+	}
+
+	rsp, err := dao.GetCommunityList(uint(ownerId))
+	if err != nil {
+		zap.S().Info("获取群列表失败", err)
+		ctx.JSON(200, gin.H{
+			"code":    -1, //  0成功   -1失败
+			"message": "你还没加入任何群聊",
+		})
+		return
+	}
+
+	common.RespOKList(ctx.Writer, rsp, len(*rsp))
+}
+
+// JoinGroup 加入群聊
+func JoinGroup(ctx *gin.Context) {
+	comInfo := ctx.PostForm("comId")
+	if comInfo == "" {
+		ctx.JSON(200, gin.H{
+			"code":    -1, //  0成功   -1失败
+			"message": "群名称不能为空",
+		})
+		return
+	}
+
+	user := ctx.PostForm("userId")
+	userId, err := strconv.Atoi(user)
+	if err != nil {
+		zap.S().Info("user类型转换失败")
+	}
+	if userId == 0 {
+		ctx.JSON(200, gin.H{
+			"code":    -1, //  0成功   -1失败
+			"message": "你未登录",
+		})
+		return
+	}
+
+	code, err := dao.JoinCommunity(uint(userId), comInfo)
+	if err != nil {
+		HandleErr(code, ctx, err)
+		return
+	}
+
+	ctx.JSON(200, gin.H{
+		"code":    0, //  0成功   -1失败
+		"message": "加群成功",
+	})
 }

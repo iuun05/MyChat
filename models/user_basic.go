@@ -45,7 +45,7 @@ func (table *UserBasic) UserTableName() string {
 
 type Relation struct {
 	Model
-	OwerId   uint   // 谁的关系信息
+	OwnerId  uint   // 谁的关系信息
 	TargetId uint   // 对应的谁
 	Type     int    // 关系描述： 1. 好友关系；2. 群关系
 	Desc     string // 描述

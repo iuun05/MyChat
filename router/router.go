@@ -19,7 +19,7 @@ func Router() *gin.Engine {
 	{
 		user.GET("/list", middlewear.JWY(), service.List)
 		user.POST("/login_pw", middlewear.JWY(), service.LoginByNameAndPassWord)
-		user.POST("/new", middlewear.JWY(), service.NewUser)
+		user.POST("/new", service.NewUser)
 		user.DELETE("/delete", middlewear.JWY(), service.DeleteUser)
 		user.POST("/updata", middlewear.JWY(), service.UpdataUser)
 	}
@@ -29,6 +29,15 @@ func Router() *gin.Engine {
 	{
 		relation.POST("/list", service.FriendList)
 		relation.POST("/add", service.AddFriendByName)
+		relation.POST("/new_group", service.NewGroup)
+		relation.POST("/group_list", service.GroupList)
+		relation.POST("/join_group", service.JoinGroup)
+	}
+
+	// 文件传输模块
+	upload := v1.Group("upload")
+	{
+		upload.POST("/image", service.Image)
 	}
 
 	return router
