@@ -15,6 +15,8 @@ func main() {
 	// init mysql
 	initialize.InitDB()
 
+	initialize.InitRedis()
+
 	router := router.Router()
 	router.Run(":8080")
 }

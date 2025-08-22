@@ -227,3 +227,7 @@ func DeleteUser(ctx *gin.Context) {
 		"message": "注销账号成功",
 	})
 }
+
+func SendUserMsg(ctx *gin.Context) {
+	models.Chat(ctx.Writer, ctx.Request)
+}

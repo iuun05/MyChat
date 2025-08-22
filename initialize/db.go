@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	redis "github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -35,4 +36,13 @@ func InitDB() {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func InitRedis() {
+	opt := redis.Options{
+		Addr:     fmt.Sprintf("%s:%d", global.ServiceConfig.RedisDB.Host, global.ServiceConfig.RedisDB.Port), // redis地址
+		Password: "",                                                                                         // redis密码，没有则留空
+		DB:       10,                                                                                         // 默认数据库，默认是0
+	}
+	global.RedisDB = redis.NewClient(&opt)
 }
