@@ -8,26 +8,28 @@ import (
 	"go.uber.org/zap"
 )
 
-// get friend list
 func FriendList(userId uint) (*[]models.UserBasic, error) {
+	// 查询好友关系
 	relation := make([]models.Relation, 0)
 	if tx := global.DB.Where("owner_id = ? and type = 1", userId).Find(&relation); tx.RowsAffected == 0 {
 		zap.S().Info("未查询到Relation数据")
 		return nil, errors.New("未查询到好友关系")
 	}
 
-	UserID := make([]uint, 0)
-
+	// 收集好友ID
+	userIDs := make([]uint, 0, len(relation))
 	for _, v := range relation {
-		UserID = append(UserID, v.TargetId)
+		userIDs = append(userIDs, v.TargetId)
 	}
 
-	user := make([]models.UserBasic, 0)
-	if tx := global.DB.Where("id in ?", UserID).Find(user); tx.RowsAffected == 0 {
-		zap.S().Info("未查询到Relation好友关系")
+	// 查询好友信息
+	users := make([]models.UserBasic, 0)
+	if tx := global.DB.Where("id IN ?", userIDs).Find(&users); tx.RowsAffected == 0 {
+		zap.S().Info("未查询到好友数据")
 		return nil, errors.New("未查到好友")
 	}
-	return &user, nil
+
+	return &users, nil
 }
 
 // add friend by userid
