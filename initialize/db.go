@@ -2,6 +2,7 @@ package initialize
 
 import (
 	"MyChat/global"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -36,6 +37,8 @@ func InitDB() {
 	if err != nil {
 		panic(err)
 	}
+
+	fmt.Println("mysql init successfully")
 }
 
 func InitRedis() {
@@ -45,4 +48,14 @@ func InitRedis() {
 		DB:       10,                                                                                         // 默认数据库，默认是0
 	}
 	global.RedisDB = redis.NewClient(&opt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	response, err := global.RedisDB.Ping(ctx).Result()
+	if err != nil {
+		panic(fmt.Sprintf("connect redis failed: %v", err))
+	}
+
+	fmt.Printf("redis init successfully response %v \n", response)
 }

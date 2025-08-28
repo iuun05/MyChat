@@ -253,7 +253,6 @@ func sendMsg(id int64, msg []byte) {
 
 // sendMsgTest 发送消息 并存储聊天记录到redis
 func sendMsgAndSave(userId int64, msg []byte) {
-
 	rwLocker.RLock()              //保证线程安全，上锁
 	node, ok := clientMap[userId] //对方是否在线
 	rwLocker.RUnlock()            //解锁
@@ -329,8 +328,10 @@ func RedisMsg(userIdA int64, userIdB int64, start int64, end int64, isRev bool) 
 	var rels []string
 	var err error
 	if isRev {
+		// ZRange 默认是 从低分数到高分数，start、end 是索引（不是分数），所以第一个是最旧的消息。
 		rels, err = global.RedisDB.ZRange(ctx, key, start, end).Result()
 	} else {
+		// ZRevRange 是 从高分数到低分数，所以第一个是最新的消息。
 		rels, err = global.RedisDB.ZRevRange(ctx, key, start, end).Result()
 	}
 	if err != nil {

@@ -9,6 +9,17 @@ import (
 )
 
 func FriendList(userId uint) (*[]models.UserBasic, error) {
+	friends, err := redisCache.GetFriendsList(userId)
+	if err != nil {
+		zap.S().Warn("[FriendList] Failed to retrieve friend list from cache ", err)
+	}
+
+	if friends != nil && len(friends) > 0 {
+		zap.S().Info("[FriendList] Friend list cache hits, user ID ", userId)
+		return &friends, nil
+	}
+
+	// cache miss, query friend relationship from database
 	// 查询好友关系
 	relation := make([]models.Relation, 0)
 	if tx := global.DB.Where("owner_id = ? and type = 1", userId).Find(&relation); tx.RowsAffected == 0 {
@@ -27,6 +38,11 @@ func FriendList(userId uint) (*[]models.UserBasic, error) {
 	if tx := global.DB.Where("id IN ?", userIDs).Find(&users); tx.RowsAffected == 0 {
 		zap.S().Info("未查询到好友数据")
 		return nil, errors.New("未查到好友")
+	}
+
+	// Write result to cache
+	if err := redisCache.SetFriendsList(userId, users); err != nil {
+		zap.S().Warn("[FriendList] Failed to write Friend list to cache ", err)
 	}
 
 	return &users, nil
@@ -85,6 +101,15 @@ func AddFriend(userId, TargetId uint) (int, error) {
 	}
 
 	tx.Commit()
+
+	// 清除缓存
+	if err := redisCache.DeleteFriendsList(userId); err != nil {
+		zap.S().Warn("[AddFriend] Failed to clear user friends cache ", err)
+	}
+	if err := redisCache.DeleteFriendsList(TargetId); err != nil {
+		zap.S().Warn("[AddFriend] Failed to clear target user friends cache", err)
+	}
+
 	return 1, nil
 }
 
