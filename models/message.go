@@ -8,13 +8,21 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
 
 	"MyChat/global"
 
 	"github.com/fatih/set"
 	"github.com/gorilla/websocket"
-	redis "github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+)
+
+// 消息缓存相关常量
+const (
+	MessageCachePrefix = "msg_cache:"
+	RecentMsgPrefix    = "recent_msg:"
+	UnreadCountPrefix  = "unread:"
 )
 
 type Message struct {
@@ -269,6 +277,7 @@ func sendMsgAndSave(userId int64, msg []byte) {
 	}
 
 	//userIdStr和targetIdStr进行拼接唯一key
+	// Guarantee that the key is not affected by the order of the userid
 	var key string
 	if userId > jsonMsg.FormId {
 		key = "msg_" + userIdStr + "_" + targetIdStr
@@ -277,21 +286,103 @@ func sendMsgAndSave(userId int64, msg []byte) {
 	}
 
 	//创建记录
-	res, err := global.RedisDB.ZRevRange(ctx, key, 0, -1).Result()
+	// res, err := global.RedisDB.ZRevRange(ctx, key, 0, -1).Result()
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
+
+	//将聊天记录写入redis缓存中
+	// score := float64(cap(res)) + 1
+	// ress, e := global.RedisDB.ZAdd(ctx, key, redis.Z{Score: score, Member: msg}).Result() //jsonMsg
+	// //res, e := utils.Red.Do(ctx, "zadd", key, 1, jsonMsg).Result() //备用 后续拓展 记录完整msg
+	// if e != nil {
+	// 	fmt.Println(e)
+	// 	return
+	// }
+	// fmt.Println(ress)
+
+	// ZCARD key 是 Redis 提供的命令，用来 返回指定有序集合中的元素数量。
+	count, err := global.RedisDB.ZCard(ctx, key).Result()
 	if err != nil {
-		fmt.Println(err)
+		zap.S().Error("[sendMsgAndSave] Failed to get number of messages ", err)
 		return
 	}
 
-	//将聊天记录写入redis缓存中
-	score := float64(cap(res)) + 1
-	ress, e := global.RedisDB.ZAdd(ctx, key, redis.Z{Score: score, Member: msg}).Result() //jsonMsg
-	//res, e := utils.Red.Do(ctx, "zadd", key, 1, jsonMsg).Result() //备用 后续拓展 记录完整msg
-	if e != nil {
-		fmt.Println(e)
+	// add message into ordered set
+	score := float64(time.Now().Unix())
+	_, err = global.RedisDB.ZAdd(ctx, key, redis.Z{Score: score, Member: msg}).Result()
+	if err != nil {
+		zap.S().Error("[sendMsgAndSave] Failed to add message to Redis ", err)
 		return
 	}
-	fmt.Println(ress)
+
+	if count > 1000 {
+		global.RedisDB.ZRemRangeByRank(ctx, key, 0, count-1000)
+	}
+
+	// update recently cache
+	recentKey := RecentMsgPrefix + targetIdStr
+	msgInfo := map[string]any{
+		"from":      jsonMsg.FormId,
+		"content":   jsonMsg.Content,
+		"timestamp": time.Now().Unix(),
+	}
+	var msgData []byte
+	msgData, err = json.Marshal(msgInfo)
+	if err != nil {
+		zap.S().Error("[sendMsgAndSave] Fail to Marshal msgInfo ", err)
+		return
+	}
+	global.RedisDB.Set(ctx, recentKey, msgData, 24*time.Hour)
+
+	// Users are only counted when they are not online
+	if !ok {
+		unreadKey := UnreadCountPrefix + targetIdStr
+		// unread message count + 1
+		global.RedisDB.Incr(ctx, unreadKey)
+		global.RedisDB.Expire(ctx, unreadKey, 30*24*time.Hour)
+	}
+}
+
+func GetRecentMessages(userIdA, userIdB int64, limit int64) ([]string, error) {
+	ctx := context.Background()
+	userIdStr := strconv.Itoa(int(userIdA))
+	targetIdStr := strconv.Itoa(int(userIdB))
+
+	// Guarantee that the key is not affected by the order of the userid
+	var key string
+	if userIdA > userIdB {
+		key = "msg_" + targetIdStr + "_" + userIdStr
+	} else {
+		key = "msg_" + userIdStr + "_" + targetIdStr
+	}
+
+	// get recently message
+	messages, err := global.RedisDB.ZRevRange(ctx, key, 0, limit-1).Result()
+	if err != nil {
+		zap.S().Error("[GetRecentMessages] Failed to get recent messages ", err)
+		return nil, err
+	}
+	return messages, nil
+}
+
+// ClearUnreadCount 清除未读消息计数
+func ClearUnreadCount(userId int64) error {
+	ctx := context.Background()
+	unreadKey := UnreadCountPrefix + strconv.Itoa(int(userId))
+	return global.RedisDB.Del(ctx, unreadKey).Err()
+}
+
+// GetUnreadCount 获取未读消息数量
+func GetUnreadCount(userId int64) (int64, error) {
+	ctx := context.Background()
+	unreadKey := UnreadCountPrefix + strconv.Itoa(int(userId))
+	count, err := global.RedisDB.Get(ctx, unreadKey).Int64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	return count, err
 }
 
 // sendGroupMsg 群发逻辑
