@@ -12,7 +12,11 @@ import (
 	"go.uber.org/zap"
 )
 
-var redisCache = cache.NewRedisCache()
+var redisCache *cache.RedisCache
+
+func init() {
+	redisCache = cache.NewRedisCache()
+}
 
 // 获取 user basics 的全部内容
 func GetUserList() (userList []*models.UserBasic, err error) {

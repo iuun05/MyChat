@@ -5,6 +5,7 @@ import (
 	"MyChat/models"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -40,8 +41,24 @@ func NewRedisCache() *RedisCache {
 	}
 }
 
+// NewTestRedisCache 创建用于测试的RedisCache实例
+func NewTestRedisCache(client *redis.Client) *RedisCache {
+	return &RedisCache{
+		client: client,
+		ctx:    context.Background(),
+	}
+}
+
+func (r *RedisCache) SetTest(userid uint) error {
+	return r.client.Set(r.ctx, fmt.Sprintf("%d", userid), "userid", UserExpiration).Err()
+}
+
+func (r *RedisCache) GetTest(userid uint) (string, error) {
+	return r.client.Get(r.ctx, fmt.Sprintf("%d", userid)).Result()
+}
+
 func (r *RedisCache) SetUser(user *models.UserBasic) error {
-	key := UserCachePrefix + string(rune(user.ID))
+	key := fmt.Sprintf("%s%d", UserCachePrefix, user.ID)
 	data, err := json.Marshal(user)
 	if err != nil {
 		zap.S().Error("序列化用户数据失败：", err)
@@ -51,8 +68,9 @@ func (r *RedisCache) SetUser(user *models.UserBasic) error {
 }
 
 func (r *RedisCache) GetUser(userID uint) (*models.UserBasic, error) {
-	key := UserCachePrefix + string(rune(userID))
+	key := fmt.Sprintf("%s%d", UserCachePrefix, userID)
 	data, err := r.client.Get(r.ctx, key).Result()
+	fmt.Println(data, err)
 	if err != nil {
 		// cache miss
 		if err == redis.Nil {
@@ -104,12 +122,14 @@ func (r *RedisCache) GetUserByName(name string) (*models.UserBasic, error) {
 }
 
 func (r *RedisCache) DeleteUser(userID uint) error {
-	key := UserCachePrefix + string(rune(userID))
+	// key := UserCachePrefix + string(rune(userID))
+	key := fmt.Sprintf("%s%d", UserCachePrefix, userID)
 	return r.client.Del(r.ctx, key).Err()
 }
 
 func (r *RedisCache) SetFriendsList(userID uint, friends []models.UserBasic) error {
-	key := FriendsCachePrefix + string(rune(userID))
+	// key := FriendsCachePrefix + string(rune(userID))
+	key := fmt.Sprintf("%s%d", FriendsCachePrefix, userID)
 	data, err := json.Marshal(friends)
 	if err != nil {
 		zap.S().Error("序列化用户朋友数据失败：", err)
@@ -119,7 +139,8 @@ func (r *RedisCache) SetFriendsList(userID uint, friends []models.UserBasic) err
 }
 
 func (r *RedisCache) GetFriendsList(userID uint) ([]models.UserBasic, error) {
-	key := FriendsCachePrefix + string(rune(userID))
+	// key := FriendsCachePrefix + string(rune(userID))
+	key := fmt.Sprintf("%s%d", FriendsCachePrefix, userID)
 	data, err := r.client.Get(r.ctx, key).Result()
 	if err != nil {
 		if err == redis.Nil {
@@ -135,30 +156,35 @@ func (r *RedisCache) GetFriendsList(userID uint) ([]models.UserBasic, error) {
 }
 
 func (r *RedisCache) DeleteFriendsList(userID uint) error {
-	key := FriendsCachePrefix + string(rune(userID))
+	// key := FriendsCachePrefix + string(rune(userID))
+	key := fmt.Sprintf("%s%d", FriendsCachePrefix, userID)
 	return r.client.Del(r.ctx, key).Err()
 }
 
 // 在线用户缓存
 func (r *RedisCache) SetUserOnline(userID uint, nodeInfo string) error {
-	key := OnlineUserPrefix + string(rune(userID))
+	// key := OnlineUserPrefix + string(rune(userID))
+	key := fmt.Sprintf("%s%d", OnlineUserPrefix, userID)
 	return r.client.Set(r.ctx, key, nodeInfo, OnlineExpiration).Err()
 }
 
 func (r *RedisCache) IsUserOnline(userID uint) (bool, error) {
-	key := OnlineUserPrefix + string(rune(userID))
+	// key := OnlineUserPrefix + string(rune(userID))
+	key := fmt.Sprintf("%s%d", OnlineUserPrefix, userID)
 	exists, err := r.client.Exists(r.ctx, key).Result()
 	return exists > 0, err
 }
 
 func (r *RedisCache) SetUserOffline(userID uint) error {
-	key := OnlineUserPrefix + string(rune(userID))
+	// key := OnlineUserPrefix + string(rune(userID))
+	key := fmt.Sprintf("%s%d", OnlineUserPrefix, userID)
 	return r.client.Del(r.ctx, key).Err()
 }
 
 // 群组缓存
 func (r *RedisCache) SetCommunityMembers(communityID uint, memberIDs []uint) error {
-	key := CommunityCachePrefix + string(rune(communityID)) + ":members"
+	// key := CommunityCachePrefix + string(rune(communityID)) + ":members"
+	key := fmt.Sprintf("%s%d:%s", CommunityCachePrefix, communityID, ":members")
 	data, err := json.Marshal(memberIDs)
 	if err != nil {
 		return err
@@ -168,7 +194,8 @@ func (r *RedisCache) SetCommunityMembers(communityID uint, memberIDs []uint) err
 }
 
 func (r *RedisCache) GetCommunityMembers(communityID uint) ([]uint, error) {
-	key := CommunityCachePrefix + string(rune(communityID)) + ":members"
+	// key := CommunityCachePrefix + string(rune(communityID)) + ":members"
+	key := fmt.Sprintf("%s%d:%s", CommunityCachePrefix, communityID, ":members")
 	data, err := r.client.Get(r.ctx, key).Result()
 	if err != nil {
 		if err == redis.Nil {

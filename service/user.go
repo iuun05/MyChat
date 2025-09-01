@@ -1,6 +1,7 @@
 package service
 
 import (
+	"MyChat/cache"
 	"MyChat/common"
 	"MyChat/dao"
 	"MyChat/middlewear"
@@ -16,6 +17,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
+
+var redisCache = cache.NewRedisCache()
 
 // 这是一个 get 方法， 可以提供管理员，目前还没有进行管理员认证鉴权，所以此时所有用户都可以调用这个 api
 func List(ctx *gin.Context) {
@@ -74,13 +77,125 @@ func LoginByNameAndPassWord(ctx *gin.Context) {
 		return
 	}
 
+	// Set user online status
+	if err := redisCache.SetUserOnline(Rsp.ID, "online"); err != nil {
+		zap.S().Warn("[LoginByNameAndPassWord/service/user] Failed to set user online status ", err)
+	}
+
 	ctx.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "登录成功",
 		"tokens":  token,
 		"userId":  Rsp.ID,
 	})
+}
 
+// GetUserStatus 获取用户在线状态
+func GetUserStatus(ctx *gin.Context) {
+	userIdStr := ctx.Query("userId")
+	userId, err := strconv.Atoi(userIdStr)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"code":    -1,
+			"message": "无效的用户ID",
+		})
+		return
+	}
+
+	isOnline, err := redisCache.IsUserOnline(uint(userId))
+	if err != nil {
+		zap.S().Error("[GetUserStatus/service/user] Failed to check user online status ", err)
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"code":    -1,
+			"message": "服务器错误",
+		})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"code":     0,
+		"message":  "success",
+		"isOnline": isOnline,
+	})
+}
+
+// Logout 用户登出
+func Logout(ctx *gin.Context) {
+	userIdStr := ctx.PostForm("userId")
+	userId, err := strconv.Atoi(userIdStr)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"code":    -1,
+			"message": "无效的用户ID",
+		})
+		return
+	}
+
+	// 设置用户离线状态
+	if err := redisCache.SetUserOffline(uint(userId)); err != nil {
+		zap.S().Warn("[Logout/service/user] Failed to set user offline status", err)
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "登出成功",
+	})
+}
+
+// 新增的消息相关接口
+func GetUnreadMessageCount(ctx *gin.Context) {
+	userIdStr := ctx.Query("userId")
+	userId, err := strconv.ParseInt(userIdStr, 10, 64)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"code":    -1,
+			"message": "无效的用户ID",
+		})
+		return
+	}
+
+	count, err := models.GetUnreadCount(userId)
+	if err != nil {
+		zap.S().Error("[GetUnreadMessageCount/service/user] Failed to get the number of unread messages ", err)
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"code":    -1,
+			"message": "服务器错误",
+		})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"count":   count,
+	})
+}
+
+func MarkMessagesAsRead(ctx *gin.Context) {
+	userIdStr := ctx.PostForm("userId")
+	userId, err := strconv.ParseInt(userIdStr, 10, 64)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"code":    -1,
+			"message": "无效的用户ID",
+		})
+		return
+	}
+
+	err = models.ClearUnreadCount(userId)
+	if err != nil {
+		zap.S().Error("[MarkMessagesAsRead/service/user] Failed to clear the number of unread messages", err)
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"code":    -1,
+			"message": "服务器错误",
+		})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "已标记为已读",
+	})
 }
 
 func NewUser(ctx *gin.Context) {

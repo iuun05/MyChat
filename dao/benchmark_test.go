@@ -1,28 +1,49 @@
 package dao
 
 import (
+	"MyChat/cache"
 	"MyChat/global"
 	"MyChat/models"
+	"context"
 	"fmt"
 	"testing"
 
+	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
 func setupBenchmark() {
+	ctx := context.Background()
 	dsn := "root:@tcp(127.0.0.1:3306)/MyChat?charset=utf8mb4&parseTime=True&loc=Local"
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
 		panic(err)
 	}
 
+	redisDb := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379", // redis地址
+		Password: "",               // redis密码，没有则留空
+		DB:       0,                // 默认数据库，默认是0
+	})
+
 	global.DB = db
+	global.RedisDB = redisDb
+
+	// 初始化dao包中的redisCache变量
+	redisCache = cache.NewRedisCache()
 
 	err = db.AutoMigrate(&models.UserBasic{}, &models.Relation{}, &models.Community{})
 	if err != nil {
 		panic(err)
 	}
+
+	_, err = global.RedisDB.Ping(ctx).Result()
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("init successfully")
 }
 
 func BenchmarkCreateUser(b *testing.B) {

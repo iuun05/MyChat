@@ -19,6 +19,107 @@ type user struct {
 	Identity string
 }
 
+// GetOnlineFriends 获取在线好友列表
+func GetOnlineFriends(ctx *gin.Context) {
+	userIdStr := ctx.PostForm("userId")
+	userId, err := strconv.Atoi(userIdStr)
+	if err != nil {
+		ctx.JSON(200, gin.H{
+			"code":    -1,
+			"message": "无效的用户ID",
+		})
+		return
+	}
+
+	// 获取好友列表
+	friends, err := dao.FriendList(uint(userId))
+	if err != nil {
+		ctx.JSON(200, gin.H{
+			"code":    -1,
+			"message": "获取好友列表失败",
+		})
+		return
+	}
+
+	// 检查每个好友的在线状态
+	onlineFriends := make([]map[string]any, 0)
+	for _, friend := range *friends {
+		isOnline, err := redisCache.IsUserOnline(friend.ID)
+		if err != nil {
+			zap.S().Warn("[GetOnlineFriends/service/relation] Failed to check friend online status ", err)
+			continue
+		}
+
+		friendInfo := map[string]any{
+			"id":       friend.ID,
+			"name":     friend.Name,
+			"avatar":   friend.Avatar,
+			"isOnline": isOnline,
+		}
+		onlineFriends = append(onlineFriends, friendInfo)
+	}
+
+	common.RespOK(ctx.Writer, onlineFriends, "获取在线好友成功")
+}
+
+// RemoveFriend 移除好友
+func RemoveFriend(ctx *gin.Context) {
+	userIdStr := ctx.PostForm("userId")
+	targetIdStr := ctx.PostForm("targetId")
+
+	userId, err1 := strconv.Atoi(userIdStr)
+	targetId, err2 := strconv.Atoi(targetIdStr)
+
+	if err1 != nil || err2 != nil {
+		ctx.JSON(200, gin.H{
+			"code":    -1,
+			"message": "无效的用户ID",
+		})
+		return
+	}
+
+	// 删除双向好友关系
+	err := dao.RemoveFriend(uint(userId), uint(targetId))
+	if err != nil {
+		ctx.JSON(200, gin.H{
+			"code":    -1,
+			"message": "移除好友失败",
+		})
+		return
+	}
+
+	ctx.JSON(200, gin.H{
+		"code":    0,
+		"message": "移除好友成功",
+	})
+}
+
+// GetRecentMessages 获取最近消息
+func GetRecentMessages(ctx *gin.Context) {
+	userIdAStr := ctx.PostForm("userIdA")
+	userIdBStr := ctx.PostForm("userIdB")
+	limitStr := ctx.PostForm("limit")
+
+	userIdA, _ := strconv.ParseInt(userIdAStr, 10, 64)
+	userIdB, _ := strconv.ParseInt(userIdBStr, 10, 64)
+	limit, _ := strconv.ParseInt(limitStr, 10, 64)
+
+	if limit <= 0 || limit > 100 {
+		limit = 20 // 默认获取20条
+	}
+
+	messages, err := models.GetRecentMessages(userIdA, userIdB, limit)
+	if err != nil {
+		ctx.JSON(200, gin.H{
+			"code":    -1,
+			"message": "获取消息失败",
+		})
+		return
+	}
+
+	common.RespOK(ctx.Writer, messages, "获取消息成功")
+}
+
 func FriendList(ctx *gin.Context) {
 	id, _ := strconv.Atoi(ctx.Request.FormValue("userId"))
 	users, err := dao.FriendList(uint(id))

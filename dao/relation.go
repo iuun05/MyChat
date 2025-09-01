@@ -113,6 +113,34 @@ func AddFriend(userId, TargetId uint) (int, error) {
 	return 1, nil
 }
 
+// RemoveFriend 移除好友关系
+func RemoveFriend(userId, targetId uint) error {
+	tx := global.DB.Begin()
+
+	// 删除双向关系
+	if t := tx.Where("owner_id = ? AND target_id = ? AND type = 1", userId, targetId).Delete(&models.Relation{}); t.RowsAffected == 0 {
+		tx.Rollback()
+		return errors.New("删除好友关系失败")
+	}
+
+	if t := tx.Where("owner_id = ? AND target_id = ? AND type = 1", targetId, userId).Delete(&models.Relation{}); t.RowsAffected == 0 {
+		tx.Rollback()
+		return errors.New("删除好友关系失败")
+	}
+
+	tx.Commit()
+
+	// 清除缓存
+	if err := redisCache.DeleteFriendsList(userId); err != nil {
+		zap.S().Warn("[RemoveFriend/dao/relation] Failed to clear user friend list cache", err)
+	}
+	if err := redisCache.DeleteFriendsList(targetId); err != nil {
+		zap.S().Warn("[RemoveFriend/dao/relation] Failed to clear target user friend list cache ", err)
+	}
+
+	return nil
+}
+
 func AddFriendByName(userId uint, targetName string) (int, error) {
 	user, err := FindUserByName(targetName)
 	if err != nil {
