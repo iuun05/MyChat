@@ -44,10 +44,13 @@ func GetOnlineFriends(ctx *gin.Context) {
 	// 检查每个好友的在线状态
 	onlineFriends := make([]map[string]any, 0)
 	for _, friend := range *friends {
-		isOnline, err := redisCache.IsUserOnline(friend.ID)
-		if err != nil {
-			zap.S().Warn("[GetOnlineFriends/service/relation] Failed to check friend online status ", err)
-			continue
+		var isOnline bool
+		if cache := getRedisCache(); cache != nil {
+			isOnline, err = cache.IsUserOnline(friend.ID)
+			if err != nil {
+				zap.S().Warn("[GetOnlineFriends/service/relation] Failed to check friend online status ", err)
+				continue
+			}
 		}
 
 		friendInfo := map[string]any{

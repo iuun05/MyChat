@@ -15,7 +15,27 @@ import (
 var redisCache *cache.RedisCache
 
 func init() {
-	redisCache = cache.NewRedisCache()
+	// 延迟初始化，等待global.RedisDB准备好
+}
+
+// InitRedisCache 初始化Redis缓存
+func InitRedisCache() {
+	if global.RedisDB != nil {
+		redisCache = cache.NewRedisCache()
+	}
+}
+
+// getRedisCache 安全地获取Redis缓存实例
+func getRedisCache() *cache.RedisCache {
+	if redisCache == nil {
+		InitRedisCache()
+		// 如果初始化后仍然是nil，说明Redis连接有问题
+		if redisCache == nil {
+			zap.S().Warn("Redis缓存未初始化，Redis连接可能有问题")
+			return nil
+		}
+	}
+	return redisCache
 }
 
 // 获取 user basics 的全部内容
@@ -43,13 +63,15 @@ func FindUserByNameAndPwd(name string, password string) (*models.UserBasic, erro
 	}
 
 	// after login in the system, set user id in cache
-	if err := redisCache.SetUser(&user); err != nil {
-		zap.S().Warn("[FindUserByNameAndPwd] Failed to update user cache after login ", err)
-	}
+	if cache := getRedisCache(); cache != nil {
+		if err := cache.SetUser(&user); err != nil {
+			zap.S().Warn("[FindUserByNameAndPwd] Failed to update user cache after login ", err)
+		}
 
-	// Set user online status
-	if err := redisCache.SetUserOnline(user.ID, "logged_in"); err != nil {
-		zap.S().Warn("[FindUserByNameAndPwd] Failed to set user online status ", err)
+		// Set user online status
+		if err := cache.SetUserOnline(user.ID, "logged_in"); err != nil {
+			zap.S().Warn("[FindUserByNameAndPwd] Failed to set user online status ", err)
+		}
 	}
 
 	return &user, nil
@@ -57,14 +79,20 @@ func FindUserByNameAndPwd(name string, password string) (*models.UserBasic, erro
 
 // find user by name
 func FindUserByName(name string) (*models.UserBasic, error) {
-	// query from redis
-	user, err := redisCache.GetUserByName(name)
-	if err != nil {
-		zap.S().Warn("[FindUserByName] Failed to retrieve user from cache ", err)
-	}
+	var user *models.UserBasic
+	var err error
 
-	if user != nil {
-		zap.S().Info("[FindUserByName] Cache hit, user ID ", user.ID)
+	// query from redis
+	if cache := getRedisCache(); cache != nil {
+		user, err = cache.GetUserByName(name)
+		if err != nil {
+			zap.S().Warn("[FindUserByName] Failed to retrieve user from cache ", err)
+		}
+
+		if user != nil {
+			zap.S().Info("[FindUserByName] Cache hit, user ID ", user.ID)
+			return user, nil
+		}
 	}
 
 	// query from mysql
@@ -74,8 +102,10 @@ func FindUserByName(name string) (*models.UserBasic, error) {
 	}
 
 	// update redis
-	if err := redisCache.SetUser(user); err != nil {
-		zap.S().Warn("Fail to update user redis ", err)
+	if cache := getRedisCache(); cache != nil {
+		if err := cache.SetUser(user); err != nil {
+			zap.S().Warn("Fail to update user redis ", err)
+		}
 	}
 
 	return user, nil
@@ -92,16 +122,22 @@ func FindUser(name string) (*models.UserBasic, error) {
 
 // Find user by user id
 func FindUserByUserID(ID uint) (*models.UserBasic, error) {
-	user, err := redisCache.GetUser(ID)
-	// cache miss
-	if err != nil {
-		zap.S().Warn("redis miss ", err)
-	}
+	var user *models.UserBasic
+	var err error
 
-	// read from redis
-	if user != nil {
-		zap.S().Info("redis hit the target ", ID)
-		return user, nil
+	// query from redis
+	if cache := getRedisCache(); cache != nil {
+		user, err = cache.GetUser(ID)
+		// cache miss
+		if err != nil {
+			zap.S().Warn("redis miss ", err)
+		}
+
+		// read from redis
+		if user != nil {
+			zap.S().Info("redis hit the target ", ID)
+			return user, nil
+		}
 	}
 
 	// query from database
@@ -111,8 +147,10 @@ func FindUserByUserID(ID uint) (*models.UserBasic, error) {
 	}
 
 	// Write result to cache
-	if err := redisCache.SetUser(user); err != nil {
-		zap.S().Warn("fail to write result to cache ", err)
+	if cache := getRedisCache(); cache != nil {
+		if err := cache.SetUser(user); err != nil {
+			zap.S().Warn("fail to write result to cache ", err)
+		}
 	}
 
 	return user, nil
@@ -143,8 +181,10 @@ func CreateUser(user models.UserBasic) (*models.UserBasic, error) {
 	}
 
 	// write new user to redis
-	if err := redisCache.SetUser(&user); err != nil {
-		zap.S().Warn("[CreateUser] Failed to write new user to cache ", err)
+	if cache := getRedisCache(); cache != nil {
+		if err := cache.SetUser(&user); err != nil {
+			zap.S().Warn("[CreateUser] Failed to write new user to cache ", err)
+		}
 	}
 
 	return &user, nil
@@ -166,13 +206,15 @@ func UpdateUser(user models.UserBasic) (*models.UserBasic, error) {
 	}
 
 	// update redis
-	if err := redisCache.SetUser(&user); err != nil {
-		zap.S().Warn("[UpdateUser] Fail to update cache ", err)
-	}
+	if cache := getRedisCache(); cache != nil {
+		if err := cache.SetUser(&user); err != nil {
+			zap.S().Warn("[UpdateUser] Fail to update cache ", err)
+		}
 
-	// delete relative friend list cache
-	if err := redisCache.DeleteFriendsList(user.ID); err != nil {
-		zap.S().Warn("[UpdateUser] Fail to delete friends' list ", err)
+		// delete relative friend list cache
+		if err := cache.DeleteFriendsList(user.ID); err != nil {
+			zap.S().Warn("[UpdateUser] Fail to delete friends' list ", err)
+		}
 	}
 
 	return &user, nil
@@ -185,13 +227,15 @@ func DeleteUser(user models.UserBasic) error {
 	}
 
 	// delete user from cache
-	if err := redisCache.DeleteUser(user.ID); err != nil {
-		zap.S().Warn("[DeleteUser] Fail to delete user from cache ", err)
-	}
+	if cache := getRedisCache(); cache != nil {
+		if err := cache.DeleteUser(user.ID); err != nil {
+			zap.S().Warn("[DeleteUser] Fail to delete user from cache ", err)
+		}
 
-	// delete friend list from cache
-	if err := redisCache.DeleteFriendsList(user.ID); err != nil {
-		zap.S().Warn("[DeleteUser] Fail to delete user friend list from cache ", err)
+		// delete friend list from cache
+		if err := cache.DeleteFriendsList(user.ID); err != nil {
+			zap.S().Warn("[DeleteUser] Fail to delete user friend list from cache ", err)
+		}
 	}
 
 	return nil

@@ -4,6 +4,7 @@ import (
 	"MyChat/cache"
 	"MyChat/common"
 	"MyChat/dao"
+	"MyChat/global"
 	"MyChat/middlewear"
 	"MyChat/models"
 	"fmt"
@@ -18,7 +19,27 @@ import (
 	"go.uber.org/zap"
 )
 
-var redisCache = cache.NewRedisCache()
+var redisCache *cache.RedisCache
+
+// InitRedisCache 初始化Redis缓存
+func InitRedisCache() {
+	if global.RedisDB != nil {
+		redisCache = cache.NewRedisCache()
+	}
+}
+
+// getRedisCache 安全地获取Redis缓存实例
+func getRedisCache() *cache.RedisCache {
+	if redisCache == nil {
+		InitRedisCache()
+		// 如果初始化后仍然是nil，说明Redis连接有问题
+		if redisCache == nil {
+			zap.S().Warn("Redis缓存未初始化，Redis连接可能有问题")
+			return nil
+		}
+	}
+	return redisCache
+}
 
 // 这是一个 get 方法， 可以提供管理员，目前还没有进行管理员认证鉴权，所以此时所有用户都可以调用这个 api
 func List(ctx *gin.Context) {
@@ -78,7 +99,7 @@ func LoginByNameAndPassWord(ctx *gin.Context) {
 	}
 
 	// Set user online status
-	if err := redisCache.SetUserOnline(Rsp.ID, "online"); err != nil {
+	if err := getRedisCache().SetUserOnline(Rsp.ID, "online"); err != nil {
 		zap.S().Warn("[LoginByNameAndPassWord/service/user] Failed to set user online status ", err)
 	}
 
@@ -102,7 +123,7 @@ func GetUserStatus(ctx *gin.Context) {
 		return
 	}
 
-	isOnline, err := redisCache.IsUserOnline(uint(userId))
+	isOnline, err := getRedisCache().IsUserOnline(uint(userId))
 	if err != nil {
 		zap.S().Error("[GetUserStatus/service/user] Failed to check user online status ", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{
@@ -132,7 +153,7 @@ func Logout(ctx *gin.Context) {
 	}
 
 	// 设置用户离线状态
-	if err := redisCache.SetUserOffline(uint(userId)); err != nil {
+	if err := getRedisCache().SetUserOffline(uint(userId)); err != nil {
 		zap.S().Warn("[Logout/service/user] Failed to set user offline status", err)
 	}
 
@@ -251,7 +272,7 @@ func NewUser(ctx *gin.Context) {
 func UpdataUser(ctx *gin.Context) {
 	user := models.UserBasic{}
 
-	id, err := strconv.Atoi(ctx.Request.FormValue("id"))
+	id, err := strconv.Atoi(ctx.PostForm("userId"))
 	if err != nil {
 		zap.S().Info("类型转换失败", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{
@@ -261,12 +282,12 @@ func UpdataUser(ctx *gin.Context) {
 		return
 	}
 	user.ID = uint(id)
-	Name := ctx.Request.FormValue("name")
-	PassWord := ctx.Request.FormValue("password")
-	Email := ctx.Request.FormValue("email")
-	Phone := ctx.Request.FormValue("phone")
-	avatar := ctx.Request.FormValue("icon")
-	gender := ctx.Request.FormValue("gender")
+	Name := ctx.PostForm("name")
+	PassWord := ctx.PostForm("password")
+	Email := ctx.PostForm("email")
+	Phone := ctx.PostForm("phone")
+	avatar := ctx.PostForm("icon")
+	gender := ctx.PostForm("gender")
 	if Name != "" {
 		user.Name = Name
 	}
@@ -316,7 +337,7 @@ func UpdataUser(ctx *gin.Context) {
 
 func DeleteUser(ctx *gin.Context) {
 	user := models.UserBasic{}
-	id, err := strconv.Atoi(ctx.Request.FormValue("id"))
+	id, err := strconv.Atoi(ctx.PostForm("userId"))
 	if err != nil {
 		zap.S().Info("类型转换失败", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{

@@ -1,7 +1,6 @@
 package dao
 
 import (
-	"MyChat/cache"
 	"MyChat/global"
 	"MyChat/models"
 	"context"
@@ -31,7 +30,7 @@ func setupBenchmark() {
 	global.RedisDB = redisDb
 
 	// 初始化dao包中的redisCache变量
-	redisCache = cache.NewRedisCache()
+	InitRedisCache()
 
 	err = db.AutoMigrate(&models.UserBasic{}, &models.Relation{}, &models.Community{})
 	if err != nil {

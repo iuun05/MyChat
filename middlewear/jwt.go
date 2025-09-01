@@ -49,7 +49,8 @@ func GenerateToken(userId uint, iss string) (string, error) {
 func JWY() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		token := ctx.PostForm("token")
-		user := ctx.Query("userId")
+		user := ctx.PostForm("userId")
+
 		userId, err := strconv.Atoi(user)
 		if err != nil {
 			ctx.JSON(http.StatusUnauthorized, map[string]string{

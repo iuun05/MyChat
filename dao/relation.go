@@ -9,14 +9,19 @@ import (
 )
 
 func FriendList(userId uint) (*[]models.UserBasic, error) {
-	friends, err := redisCache.GetFriendsList(userId)
-	if err != nil {
-		zap.S().Warn("[FriendList] Failed to retrieve friend list from cache ", err)
-	}
+	var friends []models.UserBasic
+	var err error
 
-	if friends != nil && len(friends) > 0 {
-		zap.S().Info("[FriendList] Friend list cache hits, user ID ", userId)
-		return &friends, nil
+	if cache := getRedisCache(); cache != nil {
+		friends, err = cache.GetFriendsList(userId)
+		if err != nil {
+			zap.S().Warn("[FriendList] Failed to retrieve friend list from cache ", err)
+		}
+
+		if friends != nil && len(friends) > 0 {
+			zap.S().Info("[FriendList] Friend list cache hits, user ID ", userId)
+			return &friends, nil
+		}
 	}
 
 	// cache miss, query friend relationship from database
@@ -41,8 +46,10 @@ func FriendList(userId uint) (*[]models.UserBasic, error) {
 	}
 
 	// Write result to cache
-	if err := redisCache.SetFriendsList(userId, users); err != nil {
-		zap.S().Warn("[FriendList] Failed to write Friend list to cache ", err)
+	if cache := getRedisCache(); cache != nil {
+		if err := cache.SetFriendsList(userId, users); err != nil {
+			zap.S().Warn("[FriendList] Failed to write Friend list to cache ", err)
+		}
 	}
 
 	return &users, nil
@@ -103,11 +110,13 @@ func AddFriend(userId, TargetId uint) (int, error) {
 	tx.Commit()
 
 	// 清除缓存
-	if err := redisCache.DeleteFriendsList(userId); err != nil {
-		zap.S().Warn("[AddFriend] Failed to clear user friends cache ", err)
-	}
-	if err := redisCache.DeleteFriendsList(TargetId); err != nil {
-		zap.S().Warn("[AddFriend] Failed to clear target user friends cache", err)
+	if cache := getRedisCache(); cache != nil {
+		if err := cache.DeleteFriendsList(userId); err != nil {
+			zap.S().Warn("[AddFriend] Failed to clear user friends cache ", err)
+		}
+		if err := cache.DeleteFriendsList(TargetId); err != nil {
+			zap.S().Warn("[AddFriend] Failed to clear target user friends cache", err)
+		}
 	}
 
 	return 1, nil
@@ -131,11 +140,13 @@ func RemoveFriend(userId, targetId uint) error {
 	tx.Commit()
 
 	// 清除缓存
-	if err := redisCache.DeleteFriendsList(userId); err != nil {
-		zap.S().Warn("[RemoveFriend/dao/relation] Failed to clear user friend list cache", err)
-	}
-	if err := redisCache.DeleteFriendsList(targetId); err != nil {
-		zap.S().Warn("[RemoveFriend/dao/relation] Failed to clear target user friend list cache ", err)
+	if cache := getRedisCache(); cache != nil {
+		if err := cache.DeleteFriendsList(userId); err != nil {
+			zap.S().Warn("[RemoveFriend/dao/relation] Failed to clear user friend list cache", err)
+		}
+		if err := cache.DeleteFriendsList(targetId); err != nil {
+			zap.S().Warn("[RemoveFriend/dao/relation] Failed to clear target user friend list cache ", err)
+		}
 	}
 
 	return nil

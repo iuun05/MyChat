@@ -19,7 +19,7 @@ func Router() *gin.Engine {
 
 	user := v1.Group("user")
 	{
-		user.GET("/list", middlewear.JWY(), service.List)
+		user.GET("/list", service.List)
 		user.POST("/login_pw", service.LoginByNameAndPassWord)
 		user.POST("/logout", middlewear.JWY(), service.Logout)
 		// curl -X POST http://localhost:8080/v1/user/new \
@@ -28,8 +28,8 @@ func Router() *gin.Engine {
 		//  -d "Identity=123456"
 
 		user.POST("/new", service.NewUser)
-		user.DELETE("/delete", middlewear.JWY(), service.DeleteUser)
-		user.POST("/updata", middlewear.JWY(), service.UpdataUser)
+		user.POST("/delete", middlewear.JWY(), service.DeleteUser)
+		user.POST("/update", middlewear.JWY(), service.UpdataUser)
 		// wscat -c "ws://localhost:8080/v1/user/SendUserMsg?userId=1"
 		// wscat -c "ws://localhost:8080/v1/user/SendUserMsg?userId=2"
 		// {"userId":1,"targetId":2,"type":1,"content":"hello user2"}

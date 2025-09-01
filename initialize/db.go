@@ -1,7 +1,9 @@
 package initialize
 
 import (
+	"MyChat/dao"
 	"MyChat/global"
+	"MyChat/service"
 	"context"
 	"fmt"
 	"log"
@@ -58,4 +60,8 @@ func InitRedis() {
 	}
 
 	fmt.Printf("redis init successfully response %v \n", response)
+
+	// 初始化依赖Redis的包
+	dao.InitRedisCache()
+	service.InitRedisCache()
 }
