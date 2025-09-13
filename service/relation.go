@@ -160,7 +160,7 @@ func AddFriendByName(ctx *gin.Context) {
 		return
 	}
 
-	tar := ctx.PostForm("targetName")
+	tar := ctx.PostForm("targetId")
 	target, err := strconv.Atoi(tar)
 	if err != nil {
 		code, err := dao.AddFriendByName(uint(userId), tar)

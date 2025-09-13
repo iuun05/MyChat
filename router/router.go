@@ -36,9 +36,12 @@ func Router() *gin.Engine {
 		user.GET("/SendUserMsg", middlewear.JWY(), service.SendUserMsg)
 
 		// 新增的缓存相关接口
-		user.GET("/status", middlewear.JWY(), service.GetUserStatus)
-		user.GET("/unread_count", middlewear.JWY(), service.GetUnreadMessageCount)
+		user.POST("/status", middlewear.JWY(), service.GetUserStatus)
+		user.POST("/unread_count", middlewear.JWY(), service.GetUnreadMessageCount)
 		user.POST("/mark_read", middlewear.JWY(), service.MarkMessagesAsRead)
+		user.POST("/clear_unread", middlewear.JWY(), service.MarkMessagesAsRead)
+		user.POST("/history", middlewear.JWY(), service.RedisMsg)
+		user.POST("/recent", middlewear.JWY(), service.GetRecentMessages)
 	}
 
 	//好友关系
@@ -51,8 +54,8 @@ func Router() *gin.Engine {
 		relation.POST("/join_group", service.JoinGroup)
 
 		// new
-		relation.GET("/online_friends", service.GetOnlineFriends)
-		relation.DELETE("/remove", service.RemoveFriend)
+		relation.POST("/online_friends", service.GetOnlineFriends)
+		relation.POST("/remove", service.RemoveFriend)
 	}
 
 	// 文件传输模块
@@ -62,16 +65,16 @@ func Router() *gin.Engine {
 	}
 
 	//聊天记录
-	v1.POST("/user/redisMsg", service.RedisMsg).Use(middlewear.JWY())
+	// v1.POST("/user/redisMsg", service.RedisMsg).Use(middlewear.JWY())
 
 	// 消息模块
-	message := v1.Group("message").Use(middlewear.JWY())
-	{
-		message.POST("/history", service.RedisMsg)
-		message.POST("/recent", service.GetRecentMessages)
-		message.GET("/unread/:userId", service.GetUnreadMessageCount)
-		message.POST("/clear_unread", service.MarkMessagesAsRead)
-	}
+	// message := v1.Group("message").Use(middlewear.JWY())
+	// {
+	// message.POST("/history", service.RedisMsg)
+	// message.POST("/recent", service.GetRecentMessages)
+	// message.GET("/unread/:userId", service.GetUnreadMessageCount)
+	// message.POST("/clear_unread", service.MarkMessagesAsRead)
+	// }
 
 	// 聊天记录
 	// v1.POST("/user/redisMsg", service.RedisMsg).Use(middlewear.JWY())

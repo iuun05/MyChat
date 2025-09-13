@@ -2,8 +2,6 @@
 
 ## 快速开始
 
-### 环境配置
-
 ### 安装步骤
 
 ```bash
@@ -20,6 +18,33 @@ cp .env.example .env
 
 # 4. 启动服务
 go run main.go
+```
+
+### 环境配置
+
+```yaml
+# config/config.yaml
+server:
+  port: 8080
+  mode: debug
+  
+database:
+  host: localhost
+  port: 3306
+  user: root
+  password: password
+  name: MyChat
+  
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+  
+cache:
+  user_expiration: 60m
+  friends_expiration: 15m
+  online_expiration: 5m
 ```
 
 ### 服务启动
@@ -94,218 +119,215 @@ curl -X POST http://localhost:8080/v1/user/delete \
     -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA3LCJleHAiOjE3NjE5MzE3OTUsImlzcyI6InlrIn0.Lsn1pQVPqLynjIN6xygMDqFcK3YtJkRzTAMfGml7bSE"
 ```
 
-## 👥 好友系统
+### 获取用户状态
+
+```bash
+curl -X POST "http://localhost:8080/v1/user/status" \
+        -d "userId=17307" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA3LCJleHAiOjE3NjE5MzE3OTUsImlzcyI6InlrIn0.Lsn1p
+QVPqLynjIN6xygMDqFcK3YtJkRzTAMfGml7bSE"
+```
+
+**响应结果:**
+
+```json
+{"code":0,"isOnline":false,"message":"success"}
+```
+
+### 获取未读消息数量 // 标记为已读
+
+```bash
+curl -X POST "http://localhost:8080/v1/user/unread_count" \
+        -d "userId=17307" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA3LCJleHAiOjE3NjE5MzE3OTUsImlzcyI6InlrIn0.Lsn1p
+QVPqLynjIN6xygMDqFcK3YtJkRzTAMfGml7bSE"
+```
+
+```bash
+curl -X POST "http://localhost:8080/v1/user/mark_read" \
+        -d "userId=17307" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA3LCJleHAiOjE3NjE5MzE3OTUsImlzcyI6InlrIn0.Lsn1p
+QVPqLynjIN6xygMDqFcK3YtJkRzTAMfGml7bSE"
+```
+
+## 好友系统
 
 ### 添加好友
+
 ```bash
 # 通过用户ID添加好友
-curl -X POST http://localhost:8080/v1/friend/add \
-  -H "Authorization: Bearer abc123def456" \
-  -d "target_id=1002"
-
-# 通过用户名添加好友
-curl -X POST http://localhost:8080/v1/friend/add \
-  -H "Authorization: Bearer abc123def456" \
-  -d "target_name=frienduser"
+curl -X POST http://localhost:8080/v1/relation/add \                         
+        -d "userId=17309" \                                                    
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX80" \                                                                            
+        -d "targetId=17308"
 ```
 
 **响应示例:**
 ```json
-{
-  "code": 200,
-  "message": "添加好友成功",
-  "data": {
-    "status": 1,
-    "message": "好友关系已建立"
-  }
-}
+{"code":0,"message":"添加好友成功"}
 ```
 
 ### 好友列表查询
 ```bash
-curl "http://localhost:8080/v1/friend/list" \
-  -H "Authorization: Bearer abc123def456"
+curl -X POST http://localhost:8080/v1/relation/list \
+        -d "userId=17309" -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvn
+omdabol0BqQvHbrvX80"
 ```
 
 **响应示例:**
+
 ```json
-{
-  "code": 200,
-  "message": "获取好友列表成功",
-  "data": [
-    {
-      "id": 1002,
-      "name": "frienduser",
-      "email": "friend@example.com",
-      "avatar": "avatar.jpg"
-    }
-  ]
-}
+{"Code":0,"Msg":"","Data":[{"Name":"testuser22","Avatar":"","Gender":"male","Phone":"","Email":"newemail@example.com","Identity":"8ed6e7251605894295e5717513c57c2f"}],"Rows":null,"Total":1}
 ```
 
 ### 删除好友
+
 ```bash
-curl -X DELETE http://localhost:8080/v1/friend/remove \
-  -H "Authorization: Bearer abc123def456" \
-  -d "target_id=1002"
-```
-
-## 🏘️ 群组功能
-
-### 创建群组
-```bash
-curl -X POST http://localhost:8080/v1/community/create \
-  -H "Authorization: Bearer abc123def456" \
-  -d "name=测试群组" \
-  -d "description=这是一个测试群组"
-```
-
-### 加入群组
-```bash
-curl -X POST http://localhost:8080/v1/community/join \
-  -H "Authorization: Bearer abc123def456" \
-  -d "community_id=1"
-```
-
-### 群组列表查询
-```bash
-curl "http://localhost:8080/v1/community/list" \
-  -H "Authorization: Bearer abc123def456"
-```
-
-### 群组成员查询
-```bash
-curl "http://localhost:8080/v1/community/members?community_id=1" \
-  -H "Authorization: Bearer abc123def456"
-```
-
-## 🟢 在线状态
-
-### 检查用户在线状态
-```bash
-curl "http://localhost:8080/v1/user/online?user_id=1001" \
-  -H "Authorization: Bearer abc123def456"
+curl -X POST http://localhost:8080/v1/relation/remove \
+        -d "userId=17309" -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX80" \
+        -d "targetId=17308"
 ```
 
 **响应示例:**
+
 ```json
-{
-  "code": 200,
-  "message": "查询成功",
-  "data": {
-    "user_id": 1001,
-    "is_online": true,
-    "node_info": "node1.example.com:8080",
-    "last_seen": "2025-09-02T00:00:00Z"
-  }
-}
+{"code":0,"message":"移除好友成功"}
+```
+
+## 群组功能
+
+### 创建群组
+```bash
+curl -X POST http://localhost:8080/v1/relation/new_group \
+        -d "userId=17309" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX8
+0" \
+        -d "ownerId=17309" \
+        -d "cate=2" \
+        -d "icon=./asset/upload/17558805971104473141.png" \
+        -d "desc=nothing" \
+        -d "name=学习交流群"
+```
+
+**响应示例:**
+
+```json
+{"code":0,"message":"建群成功"}
+```
+
+### 加入群组
+
+```bash
+curl -X POST http://localhost:8080/v1/relation/join_group \
+        -d "userId=17309" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX8
+0" \
+        -d "comId=学习交流群"
+```
+
+**响应示例:**
+
+```json
+{"code":0,"message":"加群成功"}
+```
+
+### 群组列表查询
+
+```bash
+curl -X POST http://localhost:8080/v1/relation/group_list \
+        -d "userId=17309" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX8
+0" \
+        -d "ownerId=17309"
+```
+
+**响应示例:**
+
+```json
+{"Code":0,"Msg":"","Data":[{"ID":8,"CreatedAt":"2025-09-02T00:10:21.982+08:00","UpdatedAt":"2025-09-02T00:10:21.982+08:00","DeletedAt":null,"Name":"Group2","OwnerId":10760,"Type":1,"Image":"","Desc":""},{"ID":15,"CreatedAt":"2025-09-13T22:39:33.817+08:00","UpdatedAt":"2025-09-13T22:39:33.817+08:00","DeletedAt":null,"Name":"学习交流群","OwnerId":17309,"Type":2,"Image":"./asset/upload/17558805971104473141.png","Desc":"nothing"}],"Rows":null,"Total":2}
+```
+
+## 在线状态
+
+### 检查用户在线状态
+
+```bash
+curl -X POST http://localhost:8080/v1/relation/online_friends \
+        -d "userId=17309" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX8
+0"
+```
+
+**响应示例:**
+
+```json
+{"Code":0,"Msg":"获取在线好友成功","Data":[{"avatar":"","id":17308,"isOnline":false,"name":"testuser22"}],"Rows":null,"Total":null}
 ```
 
 ### 设置用户离线
+
 ```bash
 curl -X POST http://localhost:8080/v1/user/logout \
-  -H "Authorization: Bearer abc123def456"
+        -d "userId=17309" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX8
+0"
 ```
 
-## 💾 缓存系统
+**响应示例:**
 
-### 缓存状态查询
-```bash
-# 查询Redis连接状态
-curl "http://localhost:8080/v1/cache/status"
-
-# 查询缓存统计信息
-curl "http://localhost:8080/v1/cache/stats"
-```
-
-### 缓存清理
-```bash
-# 清理用户缓存
-curl -X POST http://localhost:8080/v1/cache/clear/user \
-  -H "Authorization: Bearer abc123def456" \
-  -d "user_id=1001"
-
-# 清理好友列表缓存
-curl -X POST http://localhost:8080/v1/cache/clear/friends \
-  -H "Authorization: Bearer abc123def456" \
-  -d "user_id=1001"
-```
-
-## 🔌 API接口
-
-### 基础URL
-```
-http://localhost:8080/v1
-```
-
-### 认证方式
-所有需要认证的接口都需要在请求头中包含：
-```
-Authorization: Bearer <identity_token>
-```
-
-### 响应格式
 ```json
-{
-  "code": 200,           // 状态码
-  "message": "成功",      // 消息
-  "data": {},            // 数据
-  "timestamp": "2025-09-02T00:00:00Z"  // 时间戳
-}
+{"code":0,"message":"登出成功"}
 ```
 
-### 状态码说明
-- `200`: 成功
-- `400`: 请求参数错误
-- `401`: 未认证
-- `403`: 权限不足
-- `404`: 资源不存在
-- `500`: 服务器内部错误
+## 缓存
 
-## ⚙️ 配置说明
+### 历史记录
 
-### 环境变量
 ```bash
-# 数据库配置
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=password
-DB_NAME=MyChat
-
-# Redis配置
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=
-REDIS_DB=0
-
-# 服务配置
-SERVER_PORT=8080
-SERVER_MODE=debug
+curl -X POST http://localhost:8080/v1/user/redisMsg \
+        -d "userId=17309" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX8
+0" \
+      -d "userIdA=17309" \
+      -d "userIdB=17308" \
+      -d "start=1" \
+      -d "end=2"
 ```
 
-### 配置文件
-```yaml
-# config/config.yaml
-server:
-  port: 8080
-  mode: debug
-  
-database:
-  host: localhost
-  port: 3306
-  user: root
-  password: password
-  name: MyChat
-  
-redis:
-  host: localhost
-  port: 6379
-  password: ""
-  db: 0
-  
-cache:
-  user_expiration: 60m
-  friends_expiration: 15m
-  online_expiration: 5m
+```bash
+curl -X POST http://localhost:8080/v1/user/history \
+        -d "userId=17309" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX8
+0" \
+      -d "userIdA=17309" \
+      -d "userIdB=17308" \
+      -d "start=1" \
+      -d "end=2"
 ```
+
+**响应示例:**
+
+```json
+{"Code":0,"Msg":"","Data":"ok","Rows":null,"Total":[]}
+```
+
+### 获取缓存记录
+
+```bash
+curl -X POST http://localhost:8080/v1/user/history \
+        -d "userId=17309" \
+        -d "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjE3MzA5LCJleHAiOjE3NjI5NTU3MzEsImlzcyI6InlrIn0.DkbyZoY-ZkSHyoVTDVAmJGvnomdabol0BqQvHbrvX8
+0" \
+      -d "userIdA=17309" \
+      -d "userIdB=17308" \
+      -d "limit=20"
+```
+
+**响应示例:**
+
+```json
+{"Code":0,"Msg":"","Data":"ok","Rows":null,"Total":[]}
+```
+
+## 配置说明
+

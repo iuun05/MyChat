@@ -113,7 +113,7 @@ func LoginByNameAndPassWord(ctx *gin.Context) {
 
 // GetUserStatus 获取用户在线状态
 func GetUserStatus(ctx *gin.Context) {
-	userIdStr := ctx.Query("userId")
+	userIdStr := ctx.PostForm("userId")
 	userId, err := strconv.Atoi(userIdStr)
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{
@@ -165,7 +165,7 @@ func Logout(ctx *gin.Context) {
 
 // 新增的消息相关接口
 func GetUnreadMessageCount(ctx *gin.Context) {
-	userIdStr := ctx.Query("userId")
+	userIdStr := ctx.PostForm("userId")
 	userId, err := strconv.ParseInt(userIdStr, 10, 64)
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{

@@ -1,0 +1,334 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>cache: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">MyChat/cache/redis_cache.go (77.5%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package cache
+
+import (
+        "MyChat/global"
+        "MyChat/models"
+        "context"
+        "encoding/json"
+        "fmt"
+        "strconv"
+        "time"
+
+        "github.com/redis/go-redis/v9"
+        "go.uber.org/zap"
+)
+
+const (
+        // 缓存key前缀
+        UserCachePrefix      = "user:"
+        UserNameCachePrefix  = "userName:"
+        FriendsCachePrefix   = "friends:"
+        CommunityCachePrefix = "community:"
+        OnlineUserPrefix     = "online:"
+
+        // 缓存过期时间
+        DefaultExpiration = 30 * time.Minute
+        UserExpiration    = 60 * time.Minute
+        FriendsExpiration = 15 * time.Minute
+        OnlineExpiration  = 5 * time.Minute
+)
+
+type RedisCache struct {
+        client *redis.Client
+        // redis ops need context to contral timeout, cancel, trace req
+        ctx context.Context
+}
+
+func NewRedisCache() *RedisCache <span class="cov0" title="0">{
+        return &amp;RedisCache{
+                client: global.RedisDB,
+                ctx:    context.Background(),
+        }
+}</span>
+
+// NewTestRedisCache 创建用于测试的RedisCache实例
+func NewTestRedisCache(client *redis.Client) *RedisCache <span class="cov8" title="1">{
+        return &amp;RedisCache{
+                client: client,
+                ctx:    context.Background(),
+        }
+}</span>
+
+func (r *RedisCache) SetTest(userid uint) error <span class="cov8" title="1">{
+        return r.client.Set(r.ctx, fmt.Sprintf("%d", userid), "userid", UserExpiration).Err()
+}</span>
+
+func (r *RedisCache) GetTest(userid uint) (string, error) <span class="cov8" title="1">{
+        return r.client.Get(r.ctx, fmt.Sprintf("%d", userid)).Result()
+}</span>
+
+func (r *RedisCache) SetUser(user *models.UserBasic) error <span class="cov8" title="1">{
+        key := fmt.Sprintf("%s%d", UserCachePrefix, user.ID)
+        data, err := json.Marshal(user)
+        if err != nil </span><span class="cov0" title="0">{
+                zap.S().Error("序列化用户数据失败：", err)
+                return err
+        }</span>
+        <span class="cov8" title="1">return r.client.Set(r.ctx, key, data, UserExpiration).Err()</span>
+}
+
+func (r *RedisCache) GetUser(userID uint) (*models.UserBasic, error) <span class="cov8" title="1">{
+        key := fmt.Sprintf("%s%d", UserCachePrefix, userID)
+        data, err := r.client.Get(r.ctx, key).Result()
+        fmt.Println(data, err)
+        if err != nil </span><span class="cov8" title="1">{
+                // cache miss
+                if err == redis.Nil </span><span class="cov8" title="1">{
+                        return nil, nil
+                }</span>
+                <span class="cov0" title="0">return nil, err</span>
+        }
+
+        <span class="cov8" title="1">var user models.UserBasic
+        err = json.Unmarshal([]byte(data), &amp;user)
+        if err != nil </span><span class="cov0" title="0">{
+                zap.S().Error("反序列化用户数据失败：", err)
+                return nil, err
+        }</span>
+
+        <span class="cov8" title="1">return &amp;user, nil</span>
+}
+
+func (r *RedisCache) GetUserByName(name string) (*models.UserBasic, error) <span class="cov8" title="1">{
+        key := UserNameCachePrefix + name
+        // query userID from redis
+        data, err := r.client.Get(r.ctx, key).Result()
+        if err != nil </span><span class="cov0" title="0">{
+                // cache miss
+                if err == redis.Nil </span><span class="cov0" title="0">{
+                        return nil, nil
+                }</span>
+                // error
+                <span class="cov0" title="0">return nil, err</span>
+        }
+
+        <span class="cov8" title="1">var userID64 uint64
+        userID64, err = strconv.ParseUint(data, 10, 64)
+        if err != nil </span><span class="cov0" title="0">{
+                zap.S().Error("反序列化用户数据失败：", err)
+                return nil, err
+        }</span>
+
+        <span class="cov8" title="1">userID := uint(userID64)
+
+        // name -&gt; userID
+        var user *models.UserBasic
+        user, err = r.GetUser(userID)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov8" title="1">return user, nil</span>
+}
+
+func (r *RedisCache) DeleteUser(userID uint) error <span class="cov8" title="1">{
+        // key := UserCachePrefix + string(rune(userID))
+        key := fmt.Sprintf("%s%d", UserCachePrefix, userID)
+        return r.client.Del(r.ctx, key).Err()
+}</span>
+
+func (r *RedisCache) SetFriendsList(userID uint, friends []models.UserBasic) error <span class="cov8" title="1">{
+        // key := FriendsCachePrefix + string(rune(userID))
+        key := fmt.Sprintf("%s%d", FriendsCachePrefix, userID)
+        data, err := json.Marshal(friends)
+        if err != nil </span><span class="cov0" title="0">{
+                zap.S().Error("序列化用户朋友数据失败：", err)
+                return err
+        }</span>
+        <span class="cov8" title="1">return r.client.Set(r.ctx, key, data, FriendsExpiration).Err()</span>
+}
+
+func (r *RedisCache) GetFriendsList(userID uint) ([]models.UserBasic, error) <span class="cov8" title="1">{
+        // key := FriendsCachePrefix + string(rune(userID))
+        key := fmt.Sprintf("%s%d", FriendsCachePrefix, userID)
+        data, err := r.client.Get(r.ctx, key).Result()
+        if err != nil </span><span class="cov8" title="1">{
+                if err == redis.Nil </span><span class="cov8" title="1">{
+                        // cache miss
+                        return nil, nil
+                }</span>
+                <span class="cov0" title="0">return nil, err</span>
+        }
+
+        <span class="cov8" title="1">var friends []models.UserBasic
+        err = json.Unmarshal([]byte(data), &amp;friends)
+        return friends, err</span>
+}
+
+func (r *RedisCache) DeleteFriendsList(userID uint) error <span class="cov8" title="1">{
+        // key := FriendsCachePrefix + string(rune(userID))
+        key := fmt.Sprintf("%s%d", FriendsCachePrefix, userID)
+        return r.client.Del(r.ctx, key).Err()
+}</span>
+
+// 在线用户缓存
+func (r *RedisCache) SetUserOnline(userID uint, nodeInfo string) error <span class="cov8" title="1">{
+        // key := OnlineUserPrefix + string(rune(userID))
+        key := fmt.Sprintf("%s%d", OnlineUserPrefix, userID)
+        return r.client.Set(r.ctx, key, nodeInfo, OnlineExpiration).Err()
+}</span>
+
+func (r *RedisCache) IsUserOnline(userID uint) (bool, error) <span class="cov8" title="1">{
+        // key := OnlineUserPrefix + string(rune(userID))
+        key := fmt.Sprintf("%s%d", OnlineUserPrefix, userID)
+        exists, err := r.client.Exists(r.ctx, key).Result()
+        return exists &gt; 0, err
+}</span>
+
+func (r *RedisCache) SetUserOffline(userID uint) error <span class="cov8" title="1">{
+        // key := OnlineUserPrefix + string(rune(userID))
+        key := fmt.Sprintf("%s%d", OnlineUserPrefix, userID)
+        return r.client.Del(r.ctx, key).Err()
+}</span>
+
+// 群组缓存
+func (r *RedisCache) SetCommunityMembers(communityID uint, memberIDs []uint) error <span class="cov8" title="1">{
+        // key := CommunityCachePrefix + string(rune(communityID)) + ":members"
+        key := fmt.Sprintf("%s%d:%s", CommunityCachePrefix, communityID, ":members")
+        data, err := json.Marshal(memberIDs)
+        if err != nil </span><span class="cov0" title="0">{
+                return err
+        }</span>
+
+        <span class="cov8" title="1">return r.client.Set(r.ctx, key, data, DefaultExpiration).Err()</span>
+}
+
+func (r *RedisCache) GetCommunityMembers(communityID uint) ([]uint, error) <span class="cov8" title="1">{
+        // key := CommunityCachePrefix + string(rune(communityID)) + ":members"
+        key := fmt.Sprintf("%s%d:%s", CommunityCachePrefix, communityID, ":members")
+        data, err := r.client.Get(r.ctx, key).Result()
+        if err != nil </span><span class="cov0" title="0">{
+                if err == redis.Nil </span><span class="cov0" title="0">{
+                        return nil, nil
+                }</span>
+                <span class="cov0" title="0">return nil, err</span>
+        }
+
+        <span class="cov8" title="1">var memberIDs []uint
+        err = json.Unmarshal([]byte(data), &amp;memberIDs)
+        return memberIDs, err</span>
+}
+
+// 通用缓存方法
+func (r *RedisCache) Set(key string, value any, expiration time.Duration) error <span class="cov8" title="1">{
+        data, err := json.Marshal(value)
+        if err != nil </span><span class="cov0" title="0">{
+                return err
+        }</span>
+        <span class="cov8" title="1">return r.client.Set(r.ctx, key, data, expiration).Err()</span>
+}
+
+func (r *RedisCache) Get(key string, dest any) error <span class="cov8" title="1">{
+        data, err := r.client.Get(r.ctx, key).Result()
+        if err != nil </span><span class="cov8" title="1">{
+                return err
+        }</span>
+        <span class="cov8" title="1">return json.Unmarshal([]byte(data), dest)</span>
+}
+
+func (r *RedisCache) Delete(key string) error <span class="cov8" title="1">{
+        return r.client.Del(r.ctx, key).Err()
+}</span>
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
