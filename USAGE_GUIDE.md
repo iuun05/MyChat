@@ -197,6 +197,7 @@ curl -X POST http://localhost:8080/v1/relation/remove \
 ## 群组功能
 
 ### 创建群组
+
 ```bash
 curl -X POST http://localhost:8080/v1/relation/new_group \
         -d "userId=17309" \
@@ -328,6 +329,3 @@ curl -X POST http://localhost:8080/v1/user/history \
 ```json
 {"Code":0,"Msg":"","Data":"ok","Rows":null,"Total":[]}
 ```
-
-## 配置说明
-

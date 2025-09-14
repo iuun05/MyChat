@@ -1,25 +1,26 @@
-package models
+package dao
 
 import (
+	"MyChat/models"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMsgTableName(t *testing.T) {
-	msg := &Message{}
+	msg := &models.Message{}
 	tableName := msg.MsgTableName()
 	assert.Equal(t, "message", tableName)
 }
 
 func TestUserTableName(t *testing.T) {
-	user := &UserBasic{}
+	user := &models.UserBasic{}
 	tableName := user.UserTableName()
 	assert.Equal(t, "user_basic", tableName)
 }
 
 func TestRelTableName(t *testing.T) {
-	relation := &Relation{}
+	relation := &models.Relation{}
 	tableName := relation.RelTableName()
 	assert.Equal(t, "relation", tableName)
 }

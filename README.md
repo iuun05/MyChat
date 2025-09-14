@@ -21,31 +21,19 @@
 
 项目目录
 
-```
-MyChat   
-    ├── common    //放置公共文件
-    │  
-    ├── config    //做配置文件
-    │  
-    ├── dao       //数据库crud
-    │  
-    ├── global    //放置各种连接池，配置等
-    │   
-    ├── initialize  //项目初始化文件
-    │  
-    ├── middlewear  //放置web中间件
-    │ 
-    ├── models      //数据库表设计
-    │   
-    ├── router           //路由
-    │   
-    ├── service     //对外api
-    │   
-    ├── test        //测试文件
-    │  
-    ├── main.go     //项目入口
-    ├── go.mod            //项目依赖管理
-    ├── go.sum            //项目依赖管理
+``` tree
+.
+├── asset       // 放置上传的图片
+├── cache       // redis
+├── common      // 放置公共文件
+├── config      // 配置文件
+├── dao         // MySQL
+├── global      // 放置各种连接池，配置等
+├── initialize  // 项目初始化
+├── middlewear  // 中间件（拦截器）
+├── models      // 数据库表设计
+├── router      // 路由
+├── service     // 对外 api
 ```
 
 ## 初始化
@@ -119,45 +107,9 @@ Please check https://pkg.go.dev/github.com/gin-gonic/gin#readme-don-t-trust-all-
 
 就可以直接访问服务了，具体的搭建请参考上面的博客。
 
-## benchmark
 
-### Mysql
+## 新增功能
 
-1. BenchmarkCreateUser
-
-    ```log
-    Running tool: /usr/local/go/bin/go test -benchmem -run=^$ -bench ^BenchmarkCreateUser$ MyChat/dao
-
-    goos: linux
-    goarch: amd64
-    pkg: MyChat/dao
-    cpu: 12th Gen Intel(R) Core(TM) i7-12700H
-    BenchmarkCreateUser-20    	     164	   7911238 ns/op	   10884 B/op	     103 allocs/op
-    PASS
-    ok  	MyChat/dao	2.185s
-    ```
-
-2. BenchmarkFindUserByName：
-
-```log
-Running tool: /usr/local/go/bin/go test -benchmem -run=^$ -bench ^BenchmarkFindUserByName$ MyChat/dao
-
-goos: linux
-goarch: amd64
-pkg: MyChat/dao
-cpu: 12th Gen Intel(R) Core(TM) i7-12700H
-BenchmarkFindUserByName-20    	    2062	   1412352 ns/op	    8491 B/op	     125 allocs/op
-PASS
-ok  	MyChat/dao	25.205s
-```
-
-3. BenchmarkFindUserByName（可能需要添加数据）
-
-```log
-Running tool: /usr/local/go/bin/go test -benchmem -run=^$ -bench ^BenchmarkAddFriend$ MyChat/dao
-2025/08/28 21:55:02 [31;1m/home/liurun/go_projects/MyChat/dao/relation.go:54 [35;1mrecord not found
-[0m[33m[1.849ms] [34;1m[rows:0][0m SELECT * FROM `relations` WHERE (owner_id = 10745 and target_id = 10646 and type = 1) AND `relations`.`deleted_at` IS NULL ORDER BY `relations`.`id` LIMIT 1
-     105	   9983442 ns/op	   29488 B/op	     383 allocs/op
-PASS
-ok  	MyChat/dao	4.293s
-```
+1. 获取未读消息功能，并且标记为已读
+2. 检查用户在线情况
+3. 查询历史记录

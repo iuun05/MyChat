@@ -111,7 +111,7 @@ func GetRecentMessages(ctx *gin.Context) {
 		limit = 20 // 默认获取20条
 	}
 
-	messages, err := models.GetRecentMessages(userIdA, userIdB, limit)
+	messages, err := dao.GetRecentMessages(userIdA, userIdB, limit)
 	if err != nil {
 		ctx.JSON(200, gin.H{
 			"code":    -1,
@@ -335,6 +335,6 @@ func RedisMsg(c *gin.Context) {
 	start, _ := strconv.Atoi(c.PostForm("start"))
 	end, _ := strconv.Atoi(c.PostForm("end"))
 	isRev, _ := strconv.ParseBool(c.PostForm("isRev"))
-	res := models.RedisMsg(int64(userIdA), int64(userIdB), int64(start), int64(end), isRev)
+	res := dao.RedisMsg(int64(userIdA), int64(userIdB), int64(start), int64(end), isRev)
 	common.RespOKList(c.Writer, "ok", res)
 }
