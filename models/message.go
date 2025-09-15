@@ -14,7 +14,7 @@ const (
 
 type Message struct {
 	Model
-	FormId   int64  `json:"userId"`   //信息发送者
+	FromId   int64  `json:"userId"`   //信息发送者
 	TargetId int64  `json:"targetId"` //信息接收者
 	Type     int    //聊天类型：群聊 私聊 广播
 	Media    int    //信息类型：文字 图片 音频

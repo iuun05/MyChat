@@ -11,6 +11,14 @@ func Router() *gin.Engine {
 	//初始化路由
 	router := gin.Default()
 
+	// 健康检查端点
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"status":  "ok",
+			"message": "MyChat service is running",
+		})
+	})
+
 	//v1版本
 	v1 := router.Group("v1")
 

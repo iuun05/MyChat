@@ -335,6 +335,6 @@ func RedisMsg(c *gin.Context) {
 	start, _ := strconv.Atoi(c.PostForm("start"))
 	end, _ := strconv.Atoi(c.PostForm("end"))
 	isRev, _ := strconv.ParseBool(c.PostForm("isRev"))
-	res := dao.RedisMsg(int64(userIdA), int64(userIdB), int64(start), int64(end), isRev)
+	res := dao.GetUnreadMsg(c, int64(userIdA), int64(userIdB), int64(start), int64(end), isRev)
 	common.RespOKList(c.Writer, "ok", res)
 }

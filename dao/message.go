@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fatih/set"
+	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -22,12 +23,17 @@ import (
 var clientMap map[int64]*models.Node = make(map[int64]*models.Node, 0)
 var upSendChan chan []byte = make(chan []byte, 1024)
 
-func broMsg(data []byte) {
-	upSendChan <- data
-}
-
 // rw locker
 var rwLocker sync.RWMutex
+
+func broMsg(data []byte) {
+	select {
+	case upSendChan <- data:
+	default:
+		zap.S().Warn("UDP发送通道已满，消息丢弃")
+	}
+
+}
 
 // Chat    需要 ：发送者ID ，接受者ID ，消息类型，发送的内容，发送类型
 func Chat(w http.ResponseWriter, r *http.Request) {
@@ -42,10 +48,9 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 
 	// update to websocket
 	//升级为socket
-	var isvalida = true
 	conn, err := (&websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			return isvalida
+			return true
 		},
 	}).Upgrade(w, r, nil)
 	if err != nil {
@@ -61,34 +66,88 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 
 	// 将 userid 与 node 绑定
 	rwLocker.Lock()
+	// clientMap[userId] = node
+	if existingNode, exists := clientMap[userId]; exists {
+		zap.S().Warn("用户重复连接，关闭旧连接: ", userId)
+		existingNode.Conn.Close()
+		select {
+		case <-existingNode.DataQueue:
+		default:
+		}
+		close(existingNode.DataQueue)
+	}
 	clientMap[userId] = node
 	rwLocker.Unlock()
 
-	// defer func() {
-	// 	rwLocker.Lock()
-	// 	delete(clientMap, userId)
-	// 	rwLocker.Unlock()
-	// 	node.Conn.Close()
-	// }()
+	// clear unread message count
+	cctx := context.Background()
+	if err := ClearUnreadCount(cctx, userId); err != nil {
+		zap.S().Warn("清除未读消息计数失败: ", err)
+	}
+
+	// 5. 连接清理逻辑
+	defer func() {
+		rwLocker.Lock()
+		if existingNode, exists := clientMap[userId]; exists && existingNode == node {
+			delete(clientMap, userId)
+		}
+		rwLocker.Unlock()
+
+		conn.Close()
+		select {
+		case <-node.DataQueue:
+		default:
+		}
+		close(node.DataQueue)
+		zap.S().Info("用户连接已清理: ", userId)
+	}()
+
+	done := make(chan struct{}, 2)
 	//服务发送消息
-	go sendProc(node)
+	go func() {
+		defer func() {
+			done <- struct{}{}
+		}()
+		sendProc(node)
+	}()
 
 	//服务接收消息
-	go recProc(node)
+	go func() {
+		defer func() {
+			done <- struct{}{}
+		}()
+		recProc(node)
+	}()
 
-	//sendMsg(userId, []byte("欢迎进入聊天系统"))
+	sendMsg(userId, []byte("欢迎进入聊天系统"))
 
+	// 8. 等待任一协程结束
+	<-done
+
+	// 等待另一个协程结束（设置超时）
+	timeout := time.After(5 * time.Second)
+	select {
+	case <-done:
+	case <-timeout:
+		zap.S().Warn("协程清理超时: ", userId)
+	}
 }
 
 func sendProc(node *models.Node) {
 	for {
 		select {
-		case data := <-node.DataQueue:
+		case data, ok := <-node.DataQueue:
+			if !ok {
+				zap.S().Debug("数据队列已关闭")
+				return
+			}
+
 			err := node.Conn.WriteMessage(websocket.TextMessage, data)
 			if err != nil {
 				zap.S().Info("写入消息失败", err)
 				return
 			}
+
 			fmt.Println("数据发送 socket 成功")
 		}
 	}
@@ -103,29 +162,6 @@ func recProc(node *models.Node) {
 			zap.S().Info("读取消息失败", err)
 			return
 		}
-
-		//这里是简单实现的一种方法
-		// msg := Message{}
-		// err = json.Unmarshal(data, &msg)
-		// if err != nil {
-		// 	zap.S().Info("json解析失败", err)
-		// 	return
-		// }
-
-		// if msg.Type == 1 {
-		// 	zap.S().Info("这是一条私信:", msg.Content)
-		// 	rwLocker.RLock()
-		// 	tarNode, ok := clientMap[msg.TargetId]
-		// 	rwLocker.RUnlock()
-		// 	if !ok {
-		// 		zap.S().Info("不存在对应的node", msg.TargetId)
-		// 		return
-		// 	}
-
-		// 	tarNode.DataQueue <- data
-		// 	fmt.Println("发送成功：", string(data))
-		// }
-		// time.Sleep(10 * time.Millisecond)
 
 		broMsg(data)
 	}
@@ -205,7 +241,7 @@ func dispatch(data []byte) {
 	case 1: //私聊
 		sendMsgAndSave(msg.TargetId, data)
 	case 2: //群发
-		sendGroupMsg(uint(msg.FormId), uint(msg.TargetId), data)
+		sendGroupMsg(uint(msg.FromId), uint(msg.TargetId), data)
 	}
 }
 
@@ -236,7 +272,7 @@ func sendMsgAndSave(userId int64, msg []byte) {
 	json.Unmarshal(msg, &jsonMsg)
 	ctx := context.Background()
 	targetIdStr := strconv.Itoa(int(userId))
-	userIdStr := strconv.Itoa(int(jsonMsg.FormId))
+	userIdStr := strconv.Itoa(int(jsonMsg.FromId))
 
 	if ok {
 		//如果当前用户在线，将消息转发到当前用户的websocket连接中，然后进行存储
@@ -246,28 +282,11 @@ func sendMsgAndSave(userId int64, msg []byte) {
 	//userIdStr和targetIdStr进行拼接唯一key
 	// Guarantee that the key is not affected by the order of the userid
 	var key string
-	if userId > jsonMsg.FormId {
+	if userId > jsonMsg.FromId {
 		key = "msg_" + userIdStr + "_" + targetIdStr
 	} else {
 		key = "msg_" + targetIdStr + "_" + userIdStr
 	}
-
-	//创建记录
-	// res, err := global.RedisDB.ZRevRange(ctx, key, 0, -1).Result()
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	return
-	// }
-
-	//将聊天记录写入redis缓存中
-	// score := float64(cap(res)) + 1
-	// ress, e := global.RedisDB.ZAdd(ctx, key, redis.Z{Score: score, Member: msg}).Result() //jsonMsg
-	// //res, e := utils.Red.Do(ctx, "zadd", key, 1, jsonMsg).Result() //备用 后续拓展 记录完整msg
-	// if e != nil {
-	// 	fmt.Println(e)
-	// 	return
-	// }
-	// fmt.Println(ress)
 
 	// ZCARD key 是 Redis 提供的命令，用来 返回指定有序集合中的元素数量。
 	count, err := global.RedisDB.ZCard(ctx, key).Result()
@@ -291,7 +310,7 @@ func sendMsgAndSave(userId int64, msg []byte) {
 	// update recently cache
 	recentKey := models.RecentMsgPrefix + targetIdStr
 	msgInfo := map[string]any{
-		"from":      jsonMsg.FormId,
+		"from":      jsonMsg.FromId,
 		"content":   jsonMsg.Content,
 		"timestamp": time.Now().Unix(),
 	}
@@ -335,15 +354,13 @@ func GetRecentMessages(userIdA, userIdB int64, limit int64) ([]string, error) {
 }
 
 // ClearUnreadCount 清除未读消息计数
-func ClearUnreadCount(userId int64) error {
-	ctx := context.Background()
+func ClearUnreadCount(ctx context.Context, userId int64) error {
 	unreadKey := models.UnreadCountPrefix + strconv.Itoa(int(userId))
 	return global.RedisDB.Del(ctx, unreadKey).Err()
 }
 
 // GetUnreadCount 获取未读消息数量
-func GetUnreadCount(userId int64) (int64, error) {
-	ctx := context.Background()
+func GetUnreadCount(ctx context.Context, userId int64) (int64, error) {
 	unreadKey := models.UnreadCountPrefix + strconv.Itoa(int(userId))
 	count, err := global.RedisDB.Get(ctx, unreadKey).Int64()
 	if err == redis.Nil {
@@ -353,15 +370,14 @@ func GetUnreadCount(userId int64) (int64, error) {
 }
 
 // sendGroupMsg 群发逻辑
-func sendGroupMsg(formId, target uint, data []byte) (int, error) {
-	// TODO
+func sendGroupMsg(fromID, target uint, data []byte) (int, error) {
 	userIDs, err := FindUsers(target)
 	if err != nil {
 		return 1, nil
 	}
 
 	for _, userId := range *userIDs {
-		if formId != userId {
+		if fromID != userId {
 			sendMsgAndSave(int64(userId), data)
 		}
 	}
@@ -370,8 +386,7 @@ func sendGroupMsg(formId, target uint, data []byte) (int, error) {
 }
 
 // RedisMsg 获取缓存里面的聊天记录
-func RedisMsg(userIdA int64, userIdB int64, start int64, end int64, isRev bool) []string {
-	ctx := context.Background()
+func ReadRedisMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, end int64, isRev bool) []string {
 	userIdStr := strconv.Itoa(int(userIdA))
 	targetIdStr := strconv.Itoa(int(userIdB))
 
@@ -396,4 +411,63 @@ func RedisMsg(userIdA int64, userIdB int64, start int64, end int64, isRev bool) 
 		fmt.Println(err) //没有找到
 	}
 	return rels
+}
+
+func GetUnreadMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, end int64, isRev bool) []string {
+	if msgs := ReadRedisMsg(ctx, userIdA, userIdB, start, end, isRev); len(msgs) > 0 {
+		return msgs
+	}
+
+	dbmsgs := []models.Message{}
+	tx := global.DB.Where(
+		"(form_id = ? AND target_id = ?) OR (form_id = ? AND target_id = ?)",
+		userIdA, userIdB, userIdB, userIdA,
+	)
+
+	if isRev {
+		tx = tx.Order("created_at ASC")
+	} else {
+		tx = tx.Order("created_at DESC")
+	}
+
+	err := tx.Offset(int(start)).Limit(int(end - start + 1)).Find(&dbmsgs).Error
+	if err != nil {
+		fmt.Println("DB query error:", err)
+		return []string{}
+	}
+
+	if len(dbmsgs) == 0 {
+		return []string{}
+	}
+
+	userIdStr := strconv.Itoa(int(userIdA))
+	targetIdStr := strconv.Itoa(int(userIdB))
+
+	var key string
+	if userIdA > userIdB {
+		key = "msg_" + targetIdStr + "_" + userIdStr
+	} else {
+		key = "msg_" + userIdStr + "_" + targetIdStr
+	}
+
+	// pipe 是先收集好一堆命令，最后一次性发送给 redis 执行，减少 RTT，是一个批量写入的命令集合
+	pipe := global.RedisDB.Pipeline()
+	for _, m := range dbmsgs {
+		pipe.ZAdd(ctx, key, redis.Z{
+			Score:  float64(m.CreatedAt.Unix()),
+			Member: m.Content,
+		})
+	}
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		fmt.Printf("[GetUnreadMsg/dao] Fail to write message into redis, err %v", err.Error())
+	}
+
+	msgs := []string{}
+	for _, m := range dbmsgs {
+		msgs = append(msgs, m.Content)
+	}
+
+	return msgs
 }

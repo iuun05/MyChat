@@ -1,10 +1,10 @@
 port: '8000'
 mysql:
-  host: '127.0.0.1'
+  host: 'host.docker.internal'
   port: '3306'
   name: 'MyChat'
   user: 'root'
   password: ''
 redis:
-  host: '127.0.0.1'
+  host: 'host.docker.internal'
   port: '6379'

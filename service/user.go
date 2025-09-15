@@ -175,7 +175,7 @@ func GetUnreadMessageCount(ctx *gin.Context) {
 		return
 	}
 
-	count, err := dao.GetUnreadCount(userId)
+	count, err := dao.GetUnreadCount(ctx.Request.Context(), userId)
 	if err != nil {
 		zap.S().Error("[GetUnreadMessageCount/service/user] Failed to get the number of unread messages ", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{
@@ -203,7 +203,7 @@ func MarkMessagesAsRead(ctx *gin.Context) {
 		return
 	}
 
-	err = dao.ClearUnreadCount(userId)
+	err = dao.ClearUnreadCount(ctx.Request.Context(), userId)
 	if err != nil {
 		zap.S().Error("[MarkMessagesAsRead/service/user] Failed to clear the number of unread messages", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{
