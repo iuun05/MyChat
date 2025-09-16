@@ -21,6 +21,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
 // 测试用的Redis客户端
@@ -41,6 +43,15 @@ func setupMessageTest() {
 
 	// 设置全局变量
 	global.RedisDB = testRedisClient
+
+	// 可选：尝试初始化 MySQL（仅当提供 MYSQL_DSN 时）
+	if dsn := os.Getenv("MYSQL_DSN"); dsn != "" {
+		if db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{}); err == nil {
+			global.DB = db
+			// 自动迁移消息表
+			_ = db.AutoMigrate(&models.Message{})
+		}
+	}
 }
 
 // 测试清理
@@ -50,6 +61,8 @@ func teardownMessageTest() {
 		testRedisClient.FlushDB(ctx)
 		testRedisClient.Close()
 	}
+
+	// 仅在集成了 MySQL 时清理（如果需要可在此处做更多清理）
 }
 
 // TestMain 测试主函数
@@ -206,6 +219,31 @@ func TestSendMsgAndSave(t *testing.T) {
 		require.NoError(t, err)
 		assert.LessOrEqual(t, count, int64(1000))
 	})
+
+	// 仅当 MySQL 可用时运行：验证 MySQL 持久化
+	if global.DB != nil {
+		t.Run("消息持久化到MySQL", func(t *testing.T) {
+			testMessage := models.Message{
+				FromId:   10001,
+				TargetId: 10002,
+				Type:     1,
+				Content:  "mysql persist message",
+			}
+
+			msgBytes, err := json.Marshal(testMessage)
+			require.NoError(t, err)
+
+			sendMsgAndSave(testMessage.TargetId, msgBytes)
+
+			// 验证 MySQL 中存在记录
+			var count int64
+			req := global.DB.Model(&models.Message{}).
+				Where("form_id = ? AND target_id = ? AND content = ?", testMessage.FromId, testMessage.TargetId, testMessage.Content).
+				Count(&count)
+			require.NoError(t, req.Error)
+			assert.Equal(t, int64(1), count)
+		})
+	}
 }
 
 // TestGetRecentMessages 测试获取最近消息

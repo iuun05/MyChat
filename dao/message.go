@@ -329,6 +329,16 @@ func sendMsgAndSave(userId int64, msg []byte) {
 		global.RedisDB.Incr(ctx, unreadKey)
 		global.RedisDB.Expire(ctx, unreadKey, 30*24*time.Hour)
 	}
+
+	// MySQL 持久化存储
+	// 直接使用解析后的 jsonMsg 进行持久化，确保与表结构一致
+	if global.DB != nil {
+		if err := global.DB.Create(&jsonMsg).Error; err != nil {
+			zap.S().Error("[sendMsgAndSave] Failed to persist message into MySQL ", err)
+		}
+	} else {
+		zap.S().Warn("[sendMsgAndSave] global.DB is nil, skip MySQL persistence")
+	}
 }
 
 func GetRecentMessages(userIdA, userIdB int64, limit int64) ([]string, error) {
