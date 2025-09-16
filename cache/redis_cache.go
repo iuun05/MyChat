@@ -11,6 +11,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -32,6 +33,8 @@ type RedisCache struct {
 	client *redis.Client
 	// redis ops need context to contral timeout, cancel, trace req
 	ctx context.Context
+	// singleflight group for deduplicating concurrent reads by key
+	sf singleflight.Group
 }
 
 func NewRedisCache() *RedisCache {
@@ -69,7 +72,9 @@ func (r *RedisCache) SetUser(user *models.UserBasic) error {
 
 func (r *RedisCache) GetUser(userID uint) (*models.UserBasic, error) {
 	key := fmt.Sprintf("%s%d", UserCachePrefix, userID)
-	data, err := r.client.Get(r.ctx, key).Result()
+	data, err := r.sfGet(key, func() (string, error) {
+		return r.client.Get(r.ctx, key).Result()
+	})
 	fmt.Println(data, err)
 	if err != nil {
 		// cache miss
@@ -92,7 +97,9 @@ func (r *RedisCache) GetUser(userID uint) (*models.UserBasic, error) {
 func (r *RedisCache) GetUserByName(name string) (*models.UserBasic, error) {
 	key := UserNameCachePrefix + name
 	// query userID from redis
-	data, err := r.client.Get(r.ctx, key).Result()
+	data, err := r.sfGet(key, func() (string, error) {
+		return r.client.Get(r.ctx, key).Result()
+	})
 	if err != nil {
 		// cache miss
 		if err == redis.Nil {
@@ -141,7 +148,9 @@ func (r *RedisCache) SetFriendsList(userID uint, friends []models.UserBasic) err
 func (r *RedisCache) GetFriendsList(userID uint) ([]models.UserBasic, error) {
 	// key := FriendsCachePrefix + string(rune(userID))
 	key := fmt.Sprintf("%s%d", FriendsCachePrefix, userID)
-	data, err := r.client.Get(r.ctx, key).Result()
+	data, err := r.sfGet(key, func() (string, error) {
+		return r.client.Get(r.ctx, key).Result()
+	})
 	if err != nil {
 		if err == redis.Nil {
 			// cache miss
@@ -196,7 +205,9 @@ func (r *RedisCache) SetCommunityMembers(communityID uint, memberIDs []uint) err
 func (r *RedisCache) GetCommunityMembers(communityID uint) ([]uint, error) {
 	// key := CommunityCachePrefix + string(rune(communityID)) + ":members"
 	key := fmt.Sprintf("%s%d:%s", CommunityCachePrefix, communityID, ":members")
-	data, err := r.client.Get(r.ctx, key).Result()
+	data, err := r.sfGet(key, func() (string, error) {
+		return r.client.Get(r.ctx, key).Result()
+	})
 	if err != nil {
 		if err == redis.Nil {
 			return nil, nil
@@ -219,7 +230,9 @@ func (r *RedisCache) Set(key string, value any, expiration time.Duration) error 
 }
 
 func (r *RedisCache) Get(key string, dest any) error {
-	data, err := r.client.Get(r.ctx, key).Result()
+	data, err := r.sfGet(key, func() (string, error) {
+		return r.client.Get(r.ctx, key).Result()
+	})
 	if err != nil {
 		return err
 	}
@@ -228,4 +241,22 @@ func (r *RedisCache) Get(key string, dest any) error {
 
 func (r *RedisCache) Delete(key string) error {
 	return r.client.Del(r.ctx, key).Err()
+}
+
+// sfGet 使用 singleflight 通过 key 合并并发读取请求
+func (r *RedisCache) sfGet(key string, fetch func() (string, error)) (string, error) {
+	v, err, _ := r.sf.Do(key, func() (any, error) {
+		return fetch()
+	})
+	if err != nil {
+		return "", err
+	}
+	if v == nil {
+		return "", nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("singleflight unexpected type for key %s", key)
+	}
+	return s, nil
 }
