@@ -6,20 +6,22 @@
 
 相关技术栈：Go、Gin、Websocket、UDP、Mysql、Redis、Viper、Gorm、Zap、Md5、Jwt
 
-主要功能
+## 主要功能
 
 - 登录、注册、用户信息更新、账号注销
 - 单聊、群聊
 - 发送文字、表情包、图片、语音
 - 加好友、好友列表、建群、加入群
 
-系统架构
-![alt text](README/DrXEOv9xpl.png)
+这是我新加功能之后的框架。
 
-通信流程
-![alt text](README/zDGWUKX9St.png)
+![alt text](./README/框架.png)
 
-项目目录
+通信流程上没有改动，主要是让数据保存在缓存中和数据库中了，然后感觉差不多，就直接用别人的图了。
+
+![alt text](./README/zDGWUKX9St.png)
+
+## 项目目录
 
 ``` tree
 .
@@ -50,18 +52,18 @@
     go mod init MyChat && go mod tidy
     ```
 
-3. 配置 `/config/config.yaml`
+3. 配置 `./config/config.yaml`
 
     ```yaml
     port: '8000'
     mysql:
-        host: '127.0.0.1'
+        host: 'host.docker.internal'
         port: '3306'
         name: 'MyChat'
         user: 'root'
         password: ''
     redis:
-        host: '127.0.0.1'
+        host: 'host.docker.internal'
         port: '6379'
     ```
 
@@ -105,11 +107,4 @@ Please check https://pkg.go.dev/github.com/gin-gonic/gin#readme-don-t-trust-all-
 [GIN-debug] Listening and serving HTTP on :8080
 ```
 
-就可以直接访问服务了，具体的搭建请参考上面的博客。
-
-
-## 新增功能
-
-1. 获取未读消息功能，并且标记为已读
-2. 检查用户在线情况
-3. 查询历史记录
+现在就可以直接访问服务了。
