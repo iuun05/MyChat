@@ -5,6 +5,13 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	SingleMessageType = iota + 1
+	CommunityMessageType
+	BroadcastMessageType
+	HeartBeatMessageType
+)
+
 // 消息缓存相关常量
 const (
 	MessageCachePrefix = "msg_cache:"

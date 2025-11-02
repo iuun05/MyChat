@@ -35,6 +35,29 @@ func broMsg(data []byte) {
 
 }
 
+// dispatch 解析消息，聊天类型判断
+func dispatch(data []byte) {
+	//解析消息
+	msg := models.Message{}
+	err := json.Unmarshal(data, &msg)
+	if err != nil {
+		zap.S().Info("消息解析失败", err)
+		return
+	}
+
+	//判断消息类型
+	switch msg.Type {
+	case models.SingleMessageType: //私聊
+		sendMsgAndSave(msg.TargetId, data)
+	case models.CommunityMessageType: //群发
+		sendGroupMsg(uint(msg.FromId), uint(msg.TargetId), data)
+	case models.HeartBeatMessageType: // heart beat
+		// sendHeartBeatMsg(msg.TargetId, data)
+	case models.BroadcastMessageType: //广播
+		// sendBroadcastMsg(msg.TargetId, data)
+	}
+}
+
 // Chat    需要 ：发送者ID ，接受者ID ，消息类型，发送的内容，发送类型
 func Chat(w http.ResponseWriter, r *http.Request) {
 	// 1.  获取参数信息发送者userId
@@ -62,6 +85,16 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		Conn:      conn,
 		DataQueue: make(chan []byte, 50),
 		GroupSets: set.New(set.ThreadSafe),
+	}
+
+	comIds, err := GetCommunityList(uint(userId))
+	if err != nil {
+		zap.S().Error("获取群列表失败", err)
+		return
+	}
+
+	for _, comId := range *comIds {
+		node.GroupSets.Add(comId)
 	}
 
 	// 将 userid 与 node 绑定
@@ -134,23 +167,16 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 }
 
 func sendProc(node *models.Node) {
-	for {
-		select {
-		case data, ok := <-node.DataQueue:
-			if !ok {
-				zap.S().Debug("数据队列已关闭")
-				return
-			}
-
-			err := node.Conn.WriteMessage(websocket.TextMessage, data)
-			if err != nil {
-				zap.S().Info("写入消息失败", err)
-				return
-			}
-
-			fmt.Println("数据发送 socket 成功")
+	for data := range node.DataQueue {
+		err := node.Conn.WriteMessage(websocket.TextMessage, data)
+		if err != nil {
+			zap.S().Info("写入消息失败", err)
+			return
 		}
+
+		fmt.Println("数据发送 socket 成功")
 	}
+	zap.S().Debug("数据队列已关闭")
 }
 
 // recProc 从websocket中将消息体拿出，然后进行解析，再进行信息类型判断， 最后将消息发送至目的用户的node中
@@ -165,11 +191,6 @@ func recProc(node *models.Node) {
 
 		broMsg(data)
 	}
-}
-
-func init() {
-	go UdpSendProc()
-	go UpdRecProc()
 }
 
 // UdpSendProc 完成upd数据发送, 连接到udp服务端，将全局channel中的消息体，写入udp服务端
@@ -187,16 +208,13 @@ func UdpSendProc() {
 
 	defer udpConn.Close()
 
-	for {
-		select {
-		case data := <-upSendChan:
-			_, err := udpConn.Write(data)
-			if err != nil {
-				zap.S().Info("写入udp消息失败", err)
-				return
-			}
-			fmt.Println("数据成功发送到udp服务端:", string(data))
+	for data := range upSendChan {
+		_, err := udpConn.Write(data)
+		if err != nil {
+			zap.S().Info("写入udp消息失败", err)
+			return
 		}
+		fmt.Println("数据成功发送到udp服务端:", string(data))
 	}
 }
 
@@ -223,25 +241,6 @@ func UpdRecProc() {
 
 		//处理发送逻辑
 		dispatch(buf[0:n])
-	}
-}
-
-// dispatch 解析消息，聊天类型判断
-func dispatch(data []byte) {
-	//解析消息
-	msg := models.Message{}
-	err := json.Unmarshal(data, &msg)
-	if err != nil {
-		zap.S().Info("消息解析失败", err)
-		return
-	}
-
-	//判断消息类型
-	switch msg.Type {
-	case 1: //私聊
-		sendMsgAndSave(msg.TargetId, data)
-	case 2: //群发
-		sendGroupMsg(uint(msg.FromId), uint(msg.TargetId), data)
 	}
 }
 
