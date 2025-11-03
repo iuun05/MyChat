@@ -55,6 +55,7 @@ func List(ctx *gin.Context) {
 }
 
 func LoginByNameAndPassWord(ctx *gin.Context) {
+	// TODO: 封装为结构体，并进行参数校验
 	name := ctx.PostForm("name")
 	password := ctx.PostForm("password")
 	data, err := dao.FindUserByName(name)

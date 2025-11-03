@@ -11,6 +11,7 @@ import (
 	"time"
 
 	redis "github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -37,6 +38,7 @@ func InitDB() {
 	})
 
 	if err != nil {
+		zap.S().Error("mysql init failed", zap.Error(err))
 		panic(err)
 	}
 
