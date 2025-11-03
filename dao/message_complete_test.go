@@ -752,7 +752,7 @@ func TestSendProc(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			sendProc(testNode)
+			sendProc(testNode, 12345)
 		}()
 
 		// 发送测试消息
@@ -805,7 +805,7 @@ func TestRecProc(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			recProc(testNode)
+			recProc(testNode, 12345)
 		}()
 
 		// 等待处理完成

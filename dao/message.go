@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -26,6 +25,22 @@ var upSendChan chan []byte = make(chan []byte, 1024)
 // rw locker
 var rwLocker sync.RWMutex
 
+// 心跳和消息重发相关常量
+const (
+	HeartbeatInterval = 30 * time.Second // 心跳发送间隔
+	HeartbeatTimeout  = 90 * time.Second // 心跳超时时间
+	MaxRetryCount     = 3                // 最大重试次数
+	RetryInterval     = 5 * time.Second  // 重试间隔
+)
+
+// generateSeq 为Node生成唯一消息序号（每个Node独立）
+func generateSeq(node *models.Node) int64 {
+	node.SeqMutex.Lock()
+	defer node.SeqMutex.Unlock()
+	node.SeqGenerator++
+	return node.SeqGenerator
+}
+
 func broMsg(data []byte) {
 	select {
 	case upSendChan <- data:
@@ -33,29 +48,6 @@ func broMsg(data []byte) {
 		zap.S().Warn("UDP发送通道已满，消息丢弃")
 	}
 
-}
-
-// dispatch 解析消息，聊天类型判断
-func dispatch(data []byte) {
-	//解析消息
-	msg := models.Message{}
-	err := json.Unmarshal(data, &msg)
-	if err != nil {
-		zap.S().Info("消息解析失败", err)
-		return
-	}
-
-	//判断消息类型
-	switch msg.Type {
-	case models.SingleMessageType: //私聊
-		sendMsgAndSave(msg.TargetId, data)
-	case models.CommunityMessageType: //群发
-		sendGroupMsg(uint(msg.FromId), uint(msg.TargetId), data)
-	case models.HeartBeatMessageType: // heart beat
-		// sendHeartBeatMsg(msg.TargetId, data)
-	case models.BroadcastMessageType: //广播
-		// sendBroadcastMsg(msg.TargetId, data)
-	}
 }
 
 // Chat    需要 ：发送者ID ，接受者ID ，消息类型，发送的内容，发送类型
@@ -81,20 +73,30 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	node := &models.Node{
-		Conn:      conn,
-		DataQueue: make(chan []byte, 50),
-		GroupSets: set.New(set.ThreadSafe),
-	}
-
+	// 获取群列表
 	comIds, err := GetCommunityList(uint(userId))
 	if err != nil {
-		zap.S().Error("获取群列表失败", err)
-		return
+		zap.S().Warn("获取群列表失败，继续连接: ", err)
+		comIds = &[]models.Community{}
 	}
 
-	for _, comId := range *comIds {
-		node.GroupSets.Add(comId)
+	node := &models.Node{
+		Conn:            conn,
+		Addr:            r.RemoteAddr,
+		DataQueue:       make(chan []byte, 50),
+		GroupSets:       set.New(set.ThreadSafe),
+		LastHeartbeat:   time.Now(),
+		PendingMsgs:     make(map[int64][]byte),
+		LastSentSeq:     0,
+		LastReceivedSeq: 0,
+		SeqGenerator:    0,
+		HeartbeatTicker: time.NewTicker(HeartbeatInterval),
+		CloseChan:       make(chan struct{}),
+	}
+
+	// 添加群组到 GroupSets
+	for _, com := range *comIds {
+		node.GroupSets.Add(uint(com.ID))
 	}
 
 	// 将 userid 与 node 绑定
@@ -126,22 +128,42 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		}
 		rwLocker.Unlock()
 
-		conn.Close()
-		select {
-		case <-node.DataQueue:
-		default:
+		// 停止心跳定时器
+		if node.HeartbeatTicker != nil {
+			node.HeartbeatTicker.Stop()
 		}
+
+		// 关闭关闭信号通道
+		close(node.CloseChan)
+
+		// 清理待确认消息
+		node.SeqMutex.Lock()
+		node.PendingMsgs = make(map[int64][]byte)
+		node.SeqMutex.Unlock()
+
+		conn.Close()
+
+		// 清空消息队列
+		for {
+			select {
+			case <-node.DataQueue:
+			default:
+				goto done
+			}
+		}
+	done:
 		close(node.DataQueue)
 		zap.S().Info("用户连接已清理: ", userId)
 	}()
 
-	done := make(chan struct{}, 2)
+	done := make(chan struct{}, 3)
+
 	//服务发送消息
 	go func() {
 		defer func() {
 			done <- struct{}{}
 		}()
-		sendProc(node)
+		sendProc(node, userId)
 	}()
 
 	//服务接收消息
@@ -149,98 +171,403 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			done <- struct{}{}
 		}()
-		recProc(node)
+		recProc(node, userId)
 	}()
 
-	sendMsg(userId, []byte("欢迎进入聊天系统"))
+	//心跳检测协程
+	go func() {
+		defer func() {
+			done <- struct{}{}
+		}()
+		heartbeatProc(node, userId)
+	}()
+
+	// 发送欢迎消息
+	welcomeMsg := models.Message{
+		FromId:   0,
+		TargetId: userId,
+		Type:     models.SingleMessageType,
+		Content:  "欢迎进入聊天系统",
+		Seq:      generateSeq(node),
+	}
+	welcomeData, _ := json.Marshal(welcomeMsg)
+	sendMsg(userId, welcomeData)
 
 	// 8. 等待任一协程结束
 	<-done
 
-	// 等待另一个协程结束（设置超时）
+	// 等待其他协程结束（设置超时）
 	timeout := time.After(5 * time.Second)
 	select {
 	case <-done:
 	case <-timeout:
 		zap.S().Warn("协程清理超时: ", userId)
 	}
+
+	// 确保所有协程都结束
+	select {
+	case <-done:
+	default:
+	}
 }
 
-func sendProc(node *models.Node) {
-	for data := range node.DataQueue {
-		err := node.Conn.WriteMessage(websocket.TextMessage, data)
-		if err != nil {
-			zap.S().Info("写入消息失败", err)
+// sendProc 发送消息处理，支持消息确认机制
+func sendProc(node *models.Node, userId int64) {
+	ticker := time.NewTicker(RetryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case data, ok := <-node.DataQueue:
+			if !ok {
+				zap.S().Debug("数据队列已关闭")
+				return
+			}
+
+			// 解析消息获取序号
+			var msg models.Message
+			if err := json.Unmarshal(data, &msg); err != nil {
+				zap.S().Warn("解析消息失败，跳过确认机制", err)
+				// 如果解析失败，直接发送（可能是心跳消息等）
+				if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
+					zap.S().Error("写入消息失败", err)
+					return
+				}
+			}
+
+			// 如果是心跳消息，直接发送不需要确认
+			if msg.Type == models.HeartBeatMessageType {
+				if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
+					zap.S().Error("写入心跳消息失败", err)
+					return
+				}
+			}
+
+			// ACK消息处理：从待确认列表中移除对应的消息
+			if msg.Type == models.AckMessageType {
+				if msg.TargetId == userId || msg.TargetId == 0 {
+					// 从待确认列表中移除
+					node.SeqMutex.Lock()
+					if _, exists := node.PendingMsgs[msg.Seq]; exists {
+						delete(node.PendingMsgs, msg.Seq)
+						zap.S().Debugf("收到ACK确认，移除待确认消息 seq=%d", msg.Seq)
+					}
+					node.SeqMutex.Unlock()
+				} else {
+					// ACK需要路由到其他发送方Node
+					rwLocker.RLock()
+					targetNode, exists := clientMap[msg.TargetId]
+					rwLocker.RUnlock()
+
+					if exists {
+						// 发送给发送方的DataQueue
+						select {
+						case targetNode.DataQueue <- data:
+							zap.S().Debugf("ACK消息已路由到发送方 userId=%d", msg.TargetId)
+						default:
+							zap.S().Warnf("ACK消息队列已满，无法路由到 userId=%d", msg.TargetId)
+						}
+					} else {
+						zap.S().Warnf("ACK目标用户不在线 userId=%d", msg.TargetId)
+					}
+				}
+			}
+
+			// 为需要确认的消息分配序号（如果还没有）
+			if msg.Seq == 0 {
+				msg.Seq = generateSeq(node)
+				data, _ = json.Marshal(msg)
+			}
+
+			// 发送消息
+			if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				zap.S().Error("写入消息失败", err)
+				return
+			}
+
+			// 将消息加入待确认列表（需要确认的消息）
+			if msg.Type == models.SingleMessageType || msg.Type == models.CommunityMessageType {
+				node.SeqMutex.Lock()
+				node.PendingMsgs[msg.Seq] = data
+				node.LastSentSeq = msg.Seq
+				pendingCount := len(node.PendingMsgs)
+				node.SeqMutex.Unlock()
+
+				zap.S().Debugf("消息已发送，等待确认 seq=%d, 待确认消息数=%d", msg.Seq, pendingCount)
+			}
+
+		case <-ticker.C:
+			// 定时检查并重发未确认消息
+			retryPendingMsgs(node, userId)
+
+		case <-node.CloseChan:
+			zap.S().Debug("收到关闭信号，退出发送协程")
 			return
 		}
-
-		fmt.Println("数据发送 socket 成功")
 	}
-	zap.S().Debug("数据队列已关闭")
 }
 
-// recProc 从websocket中将消息体拿出，然后进行解析，再进行信息类型判断， 最后将消息发送至目的用户的node中
-func recProc(node *models.Node) {
+// recProc 接收消息处理，支持心跳响应和消息确认
+func recProc(node *models.Node, userId int64) {
+	node.Conn.SetReadDeadline(time.Now().Add(HeartbeatTimeout * 2))
+
 	for {
+		// 更新读取超时时间
+		node.Conn.SetReadDeadline(time.Now().Add(HeartbeatTimeout * 2))
+
 		//获取信息
 		_, data, err := node.Conn.ReadMessage()
 		if err != nil {
-			zap.S().Info("读取消息失败", err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				zap.S().Error("读取消息失败", err)
+			}
 			return
 		}
 
+		// 解析消息
+		var msg models.Message
+		if err := json.Unmarshal(data, &msg); err != nil {
+			zap.S().Warn("消息解析失败", err)
+			continue
+		}
+
+		// 更新最后心跳时间
+		node.LastHeartbeat = time.Now()
+
+		// 处理心跳消息
+		if msg.Type == models.HeartBeatMessageType {
+			// 发送心跳响应
+			heartbeatAck := models.Message{
+				Type:    models.HeartBeatMessageType,
+				FromId:  userId,
+				Content: "pong",
+			}
+			ackData, _ := json.Marshal(heartbeatAck)
+			select {
+			case node.DataQueue <- ackData:
+			default:
+				zap.S().Warn("心跳响应队列已满")
+			}
+			continue
+		}
+
+		// 处理ACK确认消息（从客户端接收的ACK）
+		// ACK由接收方（当前node）发送，TargetId指向原始发送方
+		// 需要将ACK路由到TargetId对应的Node，由sendProc处理
+		if msg.Type == models.AckMessageType {
+			// ACK应该转发到sendProc进行路由处理
+			// 直接放入DataQueue，由sendProc路由到发送方
+			select {
+			case node.DataQueue <- data:
+				zap.S().Debugf("ACK消息已放入队列等待路由 seq=%d", msg.Seq)
+			default:
+				zap.S().Warn("ACK确认队列已满")
+			}
+			continue
+		}
+
+		// 处理普通消息
+		if msg.Type == models.SingleMessageType || msg.Type == models.CommunityMessageType {
+			// 如果消息没有序号（客户端发送的），分配序号
+			if msg.Seq == 0 {
+				msg.Seq = generateSeq(node)
+				// 更新FromId为当前用户（客户端发送的消息）
+				msg.FromId = userId
+				var err error
+				data, err = json.Marshal(msg)
+				if err != nil {
+					zap.S().Error("重新序列化消息失败", err)
+					continue
+				}
+			}
+
+			// 检查消息序号，防止重复处理（仅对已有序号的消息）
+			if msg.Seq > 0 {
+				if msg.Seq <= node.LastReceivedSeq {
+					zap.S().Warnf("收到重复消息 seq=%d, 已处理序号=%d", msg.Seq, node.LastReceivedSeq)
+					// 即使重复，也要发送ACK（避免发送方一直重发）
+				} else {
+					node.LastReceivedSeq = msg.Seq
+				}
+
+				// 发送ACK确认，TargetId指向原始发送方
+				// 注意：如果消息是从客户端来的（FromId == userId），ACK不需要路由
+				// 如果消息是服务器转发的（FromId != userId），ACK需要路由到FromId
+				ackMsg := models.Message{
+					Type:     models.AckMessageType,
+					Seq:      msg.Seq,
+					FromId:   userId,     // 当前用户（接收方）
+					TargetId: msg.FromId, // 原始发送方
+					Content:  "ack",
+				}
+				ackData, _ := json.Marshal(ackMsg)
+				select {
+				case node.DataQueue <- ackData:
+				default:
+					zap.S().Warn("ACK确认队列已满")
+				}
+			}
+		}
+
+		// 转发消息到处理逻辑
 		broMsg(data)
 	}
 }
 
-// UdpSendProc 完成upd数据发送, 连接到udp服务端，将全局channel中的消息体，写入udp服务端
-func UdpSendProc() {
-	udpConn, err := net.DialUDP("udp", nil, &net.UDPAddr{
-		//192.168.31.147
-		IP:   net.IPv4(127, 0, 0, 1),
-		Port: 3000,
-		Zone: "",
-	})
-	if err != nil {
-		zap.S().Info("拨号udp端口失败", err)
-		return
-	}
+// heartbeatProc 心跳检测和处理协程
+func heartbeatProc(node *models.Node, userId int64) {
+	defer func() {
+		if node.HeartbeatTicker != nil {
+			node.HeartbeatTicker.Stop()
+		}
+	}()
 
-	defer udpConn.Close()
+	// 心跳超时检测定时器
+	timeoutTicker := time.NewTicker(10 * time.Second)
+	defer timeoutTicker.Stop()
 
-	for data := range upSendChan {
-		_, err := udpConn.Write(data)
-		if err != nil {
-			zap.S().Info("写入udp消息失败", err)
+	for {
+		select {
+		case <-node.HeartbeatTicker.C:
+			// 发送心跳
+			heartbeatMsg := models.Message{
+				Type:    models.HeartBeatMessageType,
+				FromId:  userId,
+				Content: "ping",
+			}
+			heartbeatData, _ := json.Marshal(heartbeatMsg)
+
+			select {
+			case node.DataQueue <- heartbeatData:
+				zap.S().Debugf("发送心跳消息 userId=%d", userId)
+			default:
+				zap.S().Warn("心跳消息队列已满")
+			}
+
+		case <-timeoutTicker.C:
+			// 检查心跳超时
+			rwLocker.RLock()
+			lastHeartbeat := node.LastHeartbeat
+			rwLocker.RUnlock()
+
+			if time.Since(lastHeartbeat) > HeartbeatTimeout {
+				zap.S().Warnf("心跳超时，断开连接 userId=%d, 最后心跳时间=%v", userId, lastHeartbeat)
+				node.Conn.Close()
+				return
+			}
+
+		case <-node.CloseChan:
+			zap.S().Debug("收到关闭信号，退出心跳协程")
 			return
 		}
-		fmt.Println("数据成功发送到udp服务端:", string(data))
 	}
 }
 
-// UpdRecProc 完成udp数据的接收，启动udp服务，获取udp客户端的写入的消息
-func UpdRecProc() {
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{
-		IP:   net.IPv4(127, 0, 0, 1),
-		Port: 3000,
-	})
-	if err != nil {
-		zap.S().Info("监听udp端口失败", err)
+// retryPendingMsgs 重发待确认消息
+func retryPendingMsgs(node *models.Node, userId int64) {
+	node.SeqMutex.Lock()
+	pendingCount := len(node.PendingMsgs)
+	if pendingCount == 0 {
+		node.SeqMutex.Unlock()
 		return
 	}
 
-	defer udpConn.Close()
+	// 复制待确认消息列表
+	pendingCopy := make(map[int64][]byte)
+	for seq, msg := range node.PendingMsgs {
+		pendingCopy[seq] = msg
+	}
+	node.SeqMutex.Unlock()
 
-	for {
-		var buf [1024]byte
-		n, err := udpConn.Read(buf[0:])
-		if err != nil {
-			zap.S().Info("读取udp数据失败", err)
-			return
+	// 重发未确认消息
+	for seq, msgData := range pendingCopy {
+		zap.S().Warnf("重发未确认消息 userId=%d, seq=%d", userId, seq)
+
+		// 直接写入连接，不经过队列避免重复
+		if err := node.Conn.WriteMessage(websocket.TextMessage, msgData); err != nil {
+			zap.S().Errorf("重发消息失败 userId=%d, seq=%d, err=%v", userId, seq, err)
+			// 如果重发失败，可能连接已断开，从待确认列表移除
+			node.SeqMutex.Lock()
+			delete(node.PendingMsgs, seq)
+			node.SeqMutex.Unlock()
 		}
+	}
+}
 
-		//处理发送逻辑
-		dispatch(buf[0:n])
+// UdpSendProc 完成upd数据发送, 连接到udp服务端，将全局channel中的消息体，写入udp服务端
+// func UdpSendProc() {
+// 	udpConn, err := net.DialUDP("udp", nil, &net.UDPAddr{
+// 		//192.168.31.147
+// 		IP:   net.IPv4(127, 0, 0, 1),
+// 		Port: 3000,
+// 		Zone: "",
+// 	})
+// 	if err != nil {
+// 		zap.S().Info("拨号udp端口失败", err)
+// 		return
+// 	}
+
+// 	defer udpConn.Close()
+
+// 	for data := range upSendChan {
+// 		_, err := udpConn.Write(data)
+// 		if err != nil {
+// 			zap.S().Info("写入udp消息失败", err)
+// 			return
+// 		}
+// 		fmt.Println("数据成功发送到udp服务端:", string(data))
+// 	}
+// }
+
+// UpdRecProc 完成udp数据的接收，启动udp服务，获取udp客户端的写入的消息
+// func UpdRecProc() {
+// 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{
+// 		IP:   net.IPv4(127, 0, 0, 1),
+// 		Port: 3000,
+// 	})
+// 	if err != nil {
+// 		zap.S().Info("监听udp端口失败", err)
+// 		return
+// 	}
+
+// 	defer udpConn.Close()
+
+// 	for {
+// 		var buf [1024]byte
+// 		n, err := udpConn.Read(buf[0:])
+// 		if err != nil {
+// 			zap.S().Info("读取udp数据失败", err)
+// 			return
+// 		}
+
+// 		//处理发送逻辑
+// 		dispatch(buf[0:n])
+// 	}
+// }
+
+// dispatch 解析消息，聊天类型判断
+func dispatch(data []byte) {
+	//解析消息
+	msg := models.Message{}
+	err := json.Unmarshal(data, &msg)
+	if err != nil {
+		zap.S().Info("消息解析失败", err)
+		return
+	}
+
+	//判断消息类型
+	switch msg.Type {
+	case models.SingleMessageType: //私聊
+		sendMsgAndSave(msg.TargetId, data)
+	case models.CommunityMessageType: //群发
+		sendGroupMsg(uint(msg.FromId), uint(msg.TargetId), data)
+	case models.HeartBeatMessageType: // 心跳消息已在recProc中处理，这里不做处理
+		zap.S().Debug("收到心跳消息")
+	case models.AckMessageType: // ACK确认消息已在recProc中处理，这里不做处理
+		zap.S().Debugf("收到ACK确认 seq=%d", msg.Seq)
+	case models.BroadcastMessageType: //广播
+		// sendBroadcastMsg(msg.TargetId, data)
+		// zap.S().Warn("广播消息功能未实现")
 	}
 }
 
@@ -261,14 +588,22 @@ func sendMsg(id int64, msg []byte) {
 	}
 }
 
-// sendMsgTest 发送消息 并存储聊天记录到redis
+// sendMsgAndSave 发送消息 并存储聊天记录到redis
 func sendMsgAndSave(userId int64, msg []byte) {
 	rwLocker.RLock()              //保证线程安全，上锁
 	node, ok := clientMap[userId] //对方是否在线
 	rwLocker.RUnlock()            //解锁
 
 	jsonMsg := models.Message{}
-	json.Unmarshal(msg, &jsonMsg)
+	if err := json.Unmarshal(msg, &jsonMsg); err != nil {
+		zap.S().Error("[sendMsgAndSave] 消息解析失败", err)
+		return
+	}
+
+	// 如果消息没有序号，说明是从客户端来的，需要找到发送方的Node分配序号
+	// 但这里消息已经到达sendMsgAndSave，说明已经经过了dispatch，消息应该已经有FromId
+	// 为了简化，如果消息没有序号，我们就不处理确认（因为无法确定发送方Node）
+	// 实际上，客户端发送的消息应该在客户端分配序号，或者服务器在recProc中分配
 	ctx := context.Background()
 	targetIdStr := strconv.Itoa(int(userId))
 	userIdStr := strconv.Itoa(int(jsonMsg.FromId))

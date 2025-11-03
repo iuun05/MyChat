@@ -1,6 +1,9 @@
 package models
 
 import (
+	"sync"
+	"time"
+
 	"github.com/fatih/set"
 	"github.com/gorilla/websocket"
 )
@@ -10,6 +13,7 @@ const (
 	CommunityMessageType
 	BroadcastMessageType
 	HeartBeatMessageType
+	AckMessageType
 )
 
 // 消息缓存相关常量
@@ -23,6 +27,7 @@ type Message struct {
 	Model
 	FromId   int64  `json:"userId"`   //信息发送者
 	TargetId int64  `json:"targetId"` //信息接收者
+	Seq      int64  `json:"seq"`      //消息序号
 	Type     int    //聊天类型：群聊 私聊 广播
 	Media    int    //信息类型：文字 图片 音频
 	Content  string //消息内容
@@ -39,8 +44,16 @@ func (m *Message) MsgTableName() string {
 
 // Node 构造连接
 type Node struct {
-	Conn      *websocket.Conn //socket连接
-	Addr      string          //客户端地址
-	DataQueue chan []byte     //消息内容
-	GroupSets set.Interface   //好友 / 群
+	Conn            *websocket.Conn  //socket连接
+	Addr            string           //客户端地址
+	DataQueue       chan []byte      //消息内容
+	GroupSets       set.Interface    //好友 / 群
+	LastHeartbeat   time.Time        //最后心跳时间
+	PendingMsgs     map[int64][]byte //待确认消息 (seq -> msg)
+	LastSentSeq     int64            //最后发送的消息序号（每个Node独立）
+	LastReceivedSeq int64            //最后收到的消息序号
+	SeqGenerator    int64            //序号生成器（每个Node独立，避免全局竞争）
+	SeqMutex        sync.Mutex       //序号生成器锁
+	HeartbeatTicker *time.Ticker     //心跳定时器
+	CloseChan       chan struct{}    //关闭信号
 }
