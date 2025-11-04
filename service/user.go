@@ -9,12 +9,9 @@ import (
 	"MyChat/models"
 	"fmt"
 	"math/rand"
-	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/asaskevich/govalidator"
-
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -32,7 +29,6 @@ func InitRedisCache() {
 func getRedisCache() *cache.RedisCache {
 	if redisCache == nil {
 		InitRedisCache()
-		// 如果初始化后仍然是nil，说明Redis连接有问题
 		if redisCache == nil {
 			zap.S().Warn("Redis缓存未初始化，Redis连接可能有问题")
 			return nil
@@ -41,330 +37,249 @@ func getRedisCache() *cache.RedisCache {
 	return redisCache
 }
 
-// 这是一个 get 方法， 可以提供管理员，目前还没有进行管理员认证鉴权，所以此时所有用户都可以调用这个 api
+// List 获取用户列表
 func List(ctx *gin.Context) {
 	list, err := dao.GetUserList()
 	if err != nil {
-		ctx.JSON(http.StatusOK, gin.H{
-			"code":    -1, //0 表示成功， -1 表示失败
-			"message": "获取用户列表失败",
-		})
+		common.Error(ctx, -1, "获取用户列表失败")
 		return
 	}
-	ctx.JSON(http.StatusOK, list)
+	common.Success(ctx, list, "获取用户列表成功")
 }
 
+// LoginByNameAndPassWord 登录
 func LoginByNameAndPassWord(ctx *gin.Context) {
-	// TODO: 封装为结构体，并进行参数校验
-	name := ctx.PostForm("name")
-	password := ctx.PostForm("password")
-	data, err := dao.FindUserByName(name)
+	var req common.LoginRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
+		return
+	}
+
+	data, err := dao.FindUserByName(req.Name)
 	if err != nil {
-		ctx.JSON(
-			http.StatusOK,
-			gin.H{
-				"code":    -1, //0 表示成功， -1 表示失败
-				"message": "登录失败",
-			})
+		common.Error(ctx, -1, "登录失败")
 		return
 	}
 
 	if data.Name == "" {
-		ctx.JSON(200, gin.H{
-			"code":    -1,
-			"message": "用户名不存在",
-		})
+		common.Error(ctx, -1, "用户名不存在")
 		return
 	}
 
-	//由于数据库密码保存是使用md5密文的， 所以验证密码时，是将密码再次加密，然后进行对比，后期会讲解md:common.CheckPassWord
-	ok := common.CheckPassWord(password, data.Salt, data.PassWord)
+	ok := common.CheckPassWord(req.Password, data.Salt, data.PassWord)
 	if !ok {
-		ctx.JSON(200, gin.H{
-			"code":    -1,
-			"message": "密码错误",
-		})
+		common.Error(ctx, -1, "密码错误")
 		return
 	}
 
-	Rsp, err := dao.FindUserByNameAndPwd(name, data.PassWord)
+	Rsp, err := dao.FindUserByNameAndPwd(req.Name, data.PassWord)
 	if err != nil {
 		zap.S().Info("登录失败", err)
+		common.Error(ctx, -1, "登录失败")
+		return
 	}
 
-	//这里使用jwt做权限认证，后面将会介绍
 	token, err := middlewear.GenerateToken(Rsp.ID, "yk")
 	if err != nil {
 		zap.S().Info("生成token失败", err)
+		common.InternalError(ctx, "生成token失败")
 		return
 	}
 
-	// Set user online status
 	if err := getRedisCache().SetUserOnline(Rsp.ID, "online"); err != nil {
 		zap.S().Warn("[LoginByNameAndPassWord/service/user] Failed to set user online status ", err)
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "登录成功",
-		"tokens":  token,
-		"userId":  Rsp.ID,
-	})
+	common.Success(ctx, gin.H{
+		"tokens": token,
+		"userId": Rsp.ID,
+	}, "登录成功")
 }
 
 // GetUserStatus 获取用户在线状态
 func GetUserStatus(ctx *gin.Context) {
-	userIdStr := ctx.PostForm("userId")
-	userId, err := strconv.Atoi(userIdStr)
-	if err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"code":    -1,
-			"message": "无效的用户ID",
-		})
+	var req common.GetUserStatusRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	isOnline, err := getRedisCache().IsUserOnline(uint(userId))
+	isOnline, err := getRedisCache().IsUserOnline(uint(req.UserId))
 	if err != nil {
 		zap.S().Error("[GetUserStatus/service/user] Failed to check user online status ", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"code":    -1,
-			"message": "服务器错误",
-		})
+		common.InternalError(ctx, "服务器错误")
 		return
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{
-		"code":     0,
-		"message":  "success",
+	common.Success(ctx, gin.H{
 		"isOnline": isOnline,
-	})
+	}, "success")
 }
 
 // Logout 用户登出
 func Logout(ctx *gin.Context) {
-	userIdStr := ctx.PostForm("userId")
-	userId, err := strconv.Atoi(userIdStr)
-	if err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"code":    -1,
-			"message": "无效的用户ID",
-		})
+	var req common.BaseRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	// 设置用户离线状态
-	if err := getRedisCache().SetUserOffline(uint(userId)); err != nil {
+	if err := getRedisCache().SetUserOffline(uint(req.UserId)); err != nil {
 		zap.S().Warn("[Logout/service/user] Failed to set user offline status", err)
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "登出成功",
-	})
+	common.Success(ctx, nil, "登出成功")
 }
 
-// 新增的消息相关接口
+// GetUnreadMessageCount 获取未读消息数
 func GetUnreadMessageCount(ctx *gin.Context) {
-	userIdStr := ctx.PostForm("userId")
-	userId, err := strconv.ParseInt(userIdStr, 10, 64)
-	if err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"code":    -1,
-			"message": "无效的用户ID",
-		})
+	var req common.GetUnreadCountRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	count, err := dao.GetUnreadCount(ctx.Request.Context(), userId)
+	count, err := dao.GetUnreadCount(ctx.Request.Context(), req.UserId)
 	if err != nil {
 		zap.S().Error("[GetUnreadMessageCount/service/user] Failed to get the number of unread messages ", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"code":    -1,
-			"message": "服务器错误",
-		})
+		common.InternalError(ctx, "服务器错误")
 		return
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "success",
-		"count":   count,
-	})
+	common.Success(ctx, gin.H{
+		"count": count,
+	}, "success")
 }
 
+// MarkMessagesAsRead 标记消息为已读
 func MarkMessagesAsRead(ctx *gin.Context) {
-	userIdStr := ctx.PostForm("userId")
-	userId, err := strconv.ParseInt(userIdStr, 10, 64)
-	if err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"code":    -1,
-			"message": "无效的用户ID",
-		})
+	var req common.MarkReadRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	err = dao.ClearUnreadCount(ctx.Request.Context(), userId)
+	err := dao.ClearUnreadCount(ctx.Request.Context(), req.UserId)
 	if err != nil {
 		zap.S().Error("[MarkMessagesAsRead/service/user] Failed to clear the number of unread messages", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"code":    -1,
-			"message": "服务器错误",
-		})
+		common.InternalError(ctx, "服务器错误")
 		return
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "已标记为已读",
-	})
+	common.Success(ctx, nil, "已标记为已读")
 }
 
+// NewUser 注册新用户
 func NewUser(ctx *gin.Context) {
-	user := models.UserBasic{}
-	user.Name = ctx.Request.FormValue("name")
-	password := ctx.Request.FormValue("password")
-	repassword := ctx.Request.FormValue("Identity")
-
-	if user.Name == "" || password == "" || repassword == "" {
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "用户名或密码不能为空！",
-			"data":    user,
-		})
+	var req common.RegisterRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	_, err := dao.FindUser(user.Name)
+	if req.Name == "" || req.Password == "" || req.Repassword == "" {
+		common.Error(ctx, -1, "用户名或密码不能为空！")
+		return
+	}
+
+	_, err := dao.FindUser(req.Name)
 	if err != nil {
-		ctx.JSON(200, gin.H{
-			"code":    -1,
-			"message": err.Error(),
-			"data":    user,
-		})
+		common.ErrorWithData(ctx, -1, err.Error(), nil)
 		return
 	}
 
-	if password != repassword {
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "两次密码不一致！",
-			"data":    user,
-		})
+	if req.Password != req.Repassword {
+		common.Error(ctx, -1, "两次密码不一致！")
 		return
 	}
 
+	user := models.UserBasic{}
 	salt := fmt.Sprintf("%d", rand.Int31())
-
-	user.PassWord = common.SaltPassWord(password, salt)
+	user.Name = req.Name
+	user.PassWord = common.SaltPassWord(req.Password, salt)
 	user.Salt = salt
 	t := time.Now()
 	user.LoginTime = &t
 	user.LoginOutTime = &t
 	user.HeartBeatTime = &t
+
 	dao.CreateUser(user)
-	ctx.JSON(200, gin.H{
-		"code":    0, //  0成功   -1失败
-		"message": "新增用户成功！",
-		"data":    user,
-	})
+	common.Success(ctx, user, "新增用户成功！")
 }
 
+// UpdataUser 更新用户信息
 func UpdataUser(ctx *gin.Context) {
-	user := models.UserBasic{}
-
-	id, err := strconv.Atoi(ctx.PostForm("userId"))
-	if err != nil {
-		zap.S().Info("类型转换失败", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "注销账号失败",
-		})
+	var req common.UpdateUserRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
-	user.ID = uint(id)
-	Name := ctx.PostForm("name")
-	PassWord := ctx.PostForm("password")
-	Email := ctx.PostForm("email")
-	Phone := ctx.PostForm("phone")
-	avatar := ctx.PostForm("icon")
-	gender := ctx.PostForm("gender")
-	if Name != "" {
-		user.Name = Name
+
+	user := models.UserBasic{}
+	user.ID = uint(req.UserId)
+
+	if req.Name != "" {
+		user.Name = req.Name
 	}
-	if PassWord != "" {
+	if req.Password != "" {
 		salt := fmt.Sprintf("%d", rand.Int31())
 		user.Salt = salt
-		user.PassWord = common.SaltPassWord(PassWord, salt)
+		user.PassWord = common.SaltPassWord(req.Password, salt)
 	}
-	if Email != "" {
-		user.Email = Email
+	if req.Email != "" {
+		user.Email = req.Email
 	}
-	if Phone != "" {
-		user.Phone = Phone
+	if req.Phone != "" {
+		user.Phone = req.Phone
 	}
-	if avatar != "" {
-		user.Avatar = avatar
+	if req.Avatar != "" {
+		user.Avatar = req.Avatar
 	}
-	if gender != "" {
-		user.Gender = gender
+	if req.Gender != "" {
+		user.Gender = req.Gender
 	}
 
-	_, err = govalidator.ValidateStruct(user)
+	_, err := govalidator.ValidateStruct(user)
 	if err != nil {
 		zap.S().Info("参数不匹配", err)
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "参数不匹配",
-		})
+		common.BadRequest(ctx, "参数不匹配")
 		return
 	}
 
 	Rsp, err := dao.UpdateUser(user)
 	if err != nil {
 		zap.S().Info("更新用户失败", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "修改信息失败",
-		})
+		common.InternalError(ctx, "修改信息失败")
 		return
 	}
-	ctx.JSON(http.StatusOK, gin.H{
-		"code":    0, //  0成功   -1失败
-		"message": "修改成功",
-		"data":    Rsp.Name,
-	})
+
+	common.Success(ctx, gin.H{
+		"name": Rsp.Name,
+	}, "修改成功")
 }
 
+// DeleteUser 删除用户
 func DeleteUser(ctx *gin.Context) {
-	user := models.UserBasic{}
-	id, err := strconv.Atoi(ctx.PostForm("userId"))
-	if err != nil {
-		zap.S().Info("类型转换失败", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "注销账号失败",
-		})
+	var req common.DeleteUserRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	user.ID = uint(id)
-	err = dao.DeleteUser(user)
+	user := models.UserBasic{}
+	user.ID = uint(req.UserId)
+
+	err := dao.DeleteUser(user)
 	if err != nil {
 		zap.S().Info("注销用户失败", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "注销账号失败",
-		})
+		common.InternalError(ctx, "注销账号失败")
 		return
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{
-		"code":    0, //  0成功   -1失败
-		"message": "注销账号成功",
-	})
+	common.Success(ctx, nil, "注销账号成功")
 }
 
+// SendUserMsg WebSocket连接
 func SendUserMsg(ctx *gin.Context) {
 	dao.Chat(ctx.Writer, ctx.Request)
 }

@@ -1,8 +1,11 @@
 package middlewear
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -48,17 +51,56 @@ func GenerateToken(userId uint, iss string) (string, error) {
 // 鉴权
 func JWY() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		token := ctx.PostForm("token")
-		user := ctx.PostForm("userId")
+		// 优先从Authorization header获取token
+		token := ""
+		authHeader := ctx.GetHeader("Authorization")
+		if authHeader != "" && len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+			token = authHeader[7:]
+		} else {
+			// 兼容旧方式：从PostForm获取
+			token = ctx.PostForm("token")
+		}
 
-		userId, err := strconv.Atoi(user)
-		if err != nil {
-			ctx.JSON(http.StatusUnauthorized, map[string]string{
-				"message": "user id unauthorized",
-			})
-			// 立即终止后续的中间件和处理函数的执行。
-			ctx.Abort()
-			return
+		// 从JSON body获取userId（如果使用JSON请求）
+		var userId int
+		var err error
+		
+		contentType := ctx.GetHeader("Content-Type")
+		if contentType == "application/json" {
+			// 读取原始body
+			bodyBytes, _ := ctx.GetRawData()
+			if len(bodyBytes) > 0 {
+				// 解析JSON获取userId
+				var reqBody struct {
+					UserId int64 `json:"userId"`
+				}
+				if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
+					userId = int(reqBody.UserId)
+				}
+				// 恢复body供后续handler使用
+				ctx.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			}
+		}
+		
+		// 如果JSON解析失败，尝试从PostForm获取（兼容旧方式）
+		if userId == 0 {
+			user := ctx.PostForm("userId")
+			if user != "" {
+				userId, err = strconv.Atoi(user)
+				if err != nil {
+					ctx.JSON(http.StatusUnauthorized, map[string]string{
+						"message": "user id unauthorized",
+					})
+					ctx.Abort()
+					return
+				}
+			} else {
+				ctx.JSON(http.StatusUnauthorized, map[string]string{
+					"message": "user id unauthorized",
+				})
+				ctx.Abort()
+				return
+			}
 		}
 
 		if token == "" {
@@ -67,32 +109,36 @@ func JWY() gin.HandlerFunc {
 			})
 			ctx.Abort()
 			return
-		} else {
-			claims, err := ParseToken(token)
-			if err != nil {
-				ctx.JSON(http.StatusUnauthorized, map[string]string{
-					"message": "token lose efficacy",
-				})
-				ctx.Abort()
-				return
-			} else if time.Now().Unix() > claims.ExpiresAt {
-				err = TokenExpired
-				ctx.JSON(http.StatusUnauthorized, map[string]string{
-					"message": "token is expired",
-				})
-				ctx.Abort()
-				return
-			}
-
-			if claims.UserID != uint(userId) {
-				ctx.JSON(http.StatusUnauthorized, map[string]string{
-					"message": "Login is invalid",
-				})
-				ctx.Abort()
-				return
-			}
 		}
 
+		claims, err := ParseToken(token)
+		if err != nil {
+			ctx.JSON(http.StatusUnauthorized, map[string]string{
+				"message": "token lose efficacy",
+			})
+			ctx.Abort()
+			return
+		}
+
+		if time.Now().Unix() > claims.ExpiresAt {
+			ctx.JSON(http.StatusUnauthorized, map[string]string{
+				"message": "token is expired",
+			})
+			ctx.Abort()
+			return
+		}
+
+		if claims.UserID != uint(userId) {
+			ctx.JSON(http.StatusUnauthorized, map[string]string{
+				"message": "Login is invalid",
+			})
+			ctx.Abort()
+			return
+		}
+
+		// 将用户ID存储到context中，供后续handler使用
+		ctx.Set("userId", uint(userId))
+		
 		fmt.Println("login is valid, welcome !")
 		// 继续执行后面的 handler
 		ctx.Next()

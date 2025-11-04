@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Image 上传图片
 func Image(ctx *gin.Context) {
 	w := ctx.Writer
 	req := ctx.Request
@@ -23,10 +24,8 @@ func Image(ctx *gin.Context) {
 	}
 	defer srcFile.Close()
 
-	// 确保目录存在
 	os.MkdirAll("./asset/upload", os.ModePerm)
 
-	// 获取后缀
 	suffix := path.Ext(head.Filename)
 	if suffix == "" {
 		suffix = ".png"
@@ -47,7 +46,6 @@ func Image(ctx *gin.Context) {
 		return
 	}
 
-	// 注意返回 URL，而不是相对路径
 	url := "/asset/upload/" + fileName
 	common.RespOK(w, url, "发送成功")
 }

@@ -4,7 +4,6 @@ import (
 	"MyChat/common"
 	"MyChat/dao"
 	"MyChat/models"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -21,27 +20,18 @@ type user struct {
 
 // GetOnlineFriends 获取在线好友列表
 func GetOnlineFriends(ctx *gin.Context) {
-	userIdStr := ctx.PostForm("userId")
-	userId, err := strconv.Atoi(userIdStr)
-	if err != nil {
-		ctx.JSON(200, gin.H{
-			"code":    -1,
-			"message": "无效的用户ID",
-		})
+	var req common.GetOnlineFriendsRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	// 获取好友列表
-	friends, err := dao.FriendList(uint(userId))
+	friends, err := dao.FriendList(uint(req.UserId))
 	if err != nil {
-		ctx.JSON(200, gin.H{
-			"code":    -1,
-			"message": "获取好友列表失败",
-		})
+		common.Error(ctx, -1, "获取好友列表失败")
 		return
 	}
 
-	// 检查每个好友的在线状态
 	onlineFriends := make([]map[string]any, 0)
 	for _, friend := range *friends {
 		var isOnline bool
@@ -62,81 +52,63 @@ func GetOnlineFriends(ctx *gin.Context) {
 		onlineFriends = append(onlineFriends, friendInfo)
 	}
 
-	common.RespOK(ctx.Writer, onlineFriends, "获取在线好友成功")
+	common.Success(ctx, onlineFriends, "获取在线好友成功")
 }
 
 // RemoveFriend 移除好友
 func RemoveFriend(ctx *gin.Context) {
-	userIdStr := ctx.PostForm("userId")
-	targetIdStr := ctx.PostForm("targetId")
-
-	userId, err1 := strconv.Atoi(userIdStr)
-	targetId, err2 := strconv.Atoi(targetIdStr)
-
-	if err1 != nil || err2 != nil {
-		ctx.JSON(200, gin.H{
-			"code":    -1,
-			"message": "无效的用户ID",
-		})
+	var req common.RemoveFriendRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	// 删除双向好友关系
-	err := dao.RemoveFriend(uint(userId), uint(targetId))
+	err := dao.RemoveFriend(uint(req.UserId), uint(req.TargetId))
 	if err != nil {
-		ctx.JSON(200, gin.H{
-			"code":    -1,
-			"message": "移除好友失败",
-		})
+		common.Error(ctx, -1, "移除好友失败")
 		return
 	}
 
-	ctx.JSON(200, gin.H{
-		"code":    0,
-		"message": "移除好友成功",
-	})
+	common.Success(ctx, nil, "移除好友成功")
 }
 
 // GetRecentMessages 获取最近消息
 func GetRecentMessages(ctx *gin.Context) {
-	userIdAStr := ctx.PostForm("userIdA")
-	userIdBStr := ctx.PostForm("userIdB")
-	limitStr := ctx.PostForm("limit")
-
-	userIdA, _ := strconv.ParseInt(userIdAStr, 10, 64)
-	userIdB, _ := strconv.ParseInt(userIdBStr, 10, 64)
-	limit, _ := strconv.ParseInt(limitStr, 10, 64)
-
-	if limit <= 0 || limit > 100 {
-		limit = 20 // 默认获取20条
-	}
-
-	messages, err := dao.GetRecentMessages(userIdA, userIdB, limit)
-	if err != nil {
-		ctx.JSON(200, gin.H{
-			"code":    -1,
-			"message": "获取消息失败",
-		})
+	var req common.GetRecentMessagesRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	common.RespOK(ctx.Writer, messages, "获取消息成功")
+	if req.Limit <= 0 || req.Limit > 100 {
+		req.Limit = 20
+	}
+
+	messages, err := dao.GetRecentMessages(req.UserId, req.UserIdB, req.Limit)
+	if err != nil {
+		common.Error(ctx, -1, "获取消息失败")
+		return
+	}
+
+	common.Success(ctx, messages, "获取消息成功")
 }
 
+// FriendList 获取好友列表
 func FriendList(ctx *gin.Context) {
-	id, _ := strconv.Atoi(ctx.Request.FormValue("userId"))
-	users, err := dao.FriendList(uint(id))
+	var req common.FriendListRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
+		return
+	}
+
+	users, err := dao.FriendList(uint(req.UserId))
 	if err != nil {
 		zap.S().Info("获取好友列表失败", err)
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "好友为空",
-		})
+		common.Error(ctx, -1, "好友为空")
 		return
 	}
 
 	infos := make([]user, 0)
-
 	for _, v := range *users {
 		info := user{
 			Name:     v.Name,
@@ -148,108 +120,79 @@ func FriendList(ctx *gin.Context) {
 		}
 		infos = append(infos, info)
 	}
-	common.RespOKList(ctx.Writer, infos, len(infos))
+
+	common.SuccessWithTotal(ctx, infos, len(infos), "获取好友列表成功")
 }
 
-// AddFriendByName 通过昵称加好友
+// AddFriendByName 添加好友
 func AddFriendByName(ctx *gin.Context) {
-	user := ctx.PostForm("userId")
-	userId, err := strconv.Atoi(user)
-	if err != nil {
-		zap.S().Info("类型转换失败", err)
+	var req common.AddFriendRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	tar := ctx.PostForm("targetId")
-	target, err := strconv.Atoi(tar)
-	if err != nil {
-		code, err := dao.AddFriendByName(uint(userId), tar)
-		if err != nil {
-			HandleErr(code, ctx, err)
-			return
-		}
+	var code int
+	var err error
 
-	} else {
-		code, err := dao.AddFriend(uint(userId), uint(target))
+	// 判断targetId是数字还是字符串（用户名）
+	if req.TargetId != "" {
+		code, err = dao.AddFriendByName(uint(req.UserId), req.TargetId)
 		if err != nil {
 			HandleErr(code, ctx, err)
 			return
 		}
+	} else {
+		common.BadRequest(ctx, "targetId不能为空")
+		return
 	}
-	ctx.JSON(200, gin.H{
-		"code":    0, //  0成功   -1失败
-		"message": "添加好友成功",
-	})
+
+	common.Success(ctx, nil, "添加好友成功")
 }
 
+// HandleErr 处理错误
 func HandleErr(code int, ctx *gin.Context, err error) {
 	switch code {
 	case -1:
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": err.Error(),
-		})
+		common.Error(ctx, -1, err.Error())
 	case 0:
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "该好友已经存在",
-		})
+		common.Error(ctx, -1, "该好友已经存在")
 	case -2:
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "不能添加自己",
-		})
-
+		common.Error(ctx, -1, "不能添加自己")
+	default:
+		common.Error(ctx, -1, "未知错误")
 	}
 }
 
 // NewGroup 新建群聊
 func NewGroup(ctx *gin.Context) {
-	owner := ctx.PostForm("ownerId")
-	ownerId, err := strconv.Atoi(owner)
-	if err != nil {
-		zap.S().Info("owner类型转换失败", err)
+	var req common.NewGroupRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	ty := ctx.PostForm("cate")
-	Type, err := strconv.Atoi(ty)
-	if err != nil {
-		zap.S().Info("ty类型转换失败", err)
+	if req.UserId == 0 {
+		common.Error(ctx, -1, "您未登录")
 		return
 	}
 
-	img := ctx.PostForm("icon")
-	name := ctx.PostForm("name")
-	desc := ctx.PostForm("desc")
+	if req.Name == "" {
+		common.Error(ctx, -1, "群名称不能为空")
+		return
+	}
 
 	community := models.Community{}
-	if ownerId == 0 {
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "您未登录",
-		})
-		return
+	if req.Icon != "" {
+		community.Image = req.Icon
+	}
+	if req.Desc != "" {
+		community.Desc = req.Desc
 	}
 
-	if name == "" {
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "群名称不能为空",
-		})
-		return
-	}
-
-	if img != "" {
-		community.Image = img
-	}
-	if desc != "" {
-		community.Desc = desc
-	}
-
-	community.Name = name
-	community.Type = Type
-	community.OwnerId = uint(ownerId)
+	community.Name = req.Name
+	community.Type = req.Type
+	community.OwnerId = uint(req.UserId)
 
 	code, err := dao.CreateCommunity(community)
 	if err != nil {
@@ -257,84 +200,67 @@ func NewGroup(ctx *gin.Context) {
 		return
 	}
 
-	ctx.JSON(200, gin.H{
-		"code":    0, //  0成功   -1失败
-		"message": "建群成功",
-	})
+	common.Success(ctx, nil, "建群成功")
 }
 
 // GroupList 获取群列表
 func GroupList(ctx *gin.Context) {
-	owner := ctx.PostForm("ownerId")
-	ownerId, err := strconv.Atoi(owner)
-	if err != nil {
-		zap.S().Info("owner类型转换失败", err)
+	var req common.GroupListRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	if ownerId == 0 {
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "您未登录",
-		})
+	if req.UserId == 0 {
+		common.Error(ctx, -1, "您未登录")
 		return
 	}
 
-	rsp, err := dao.GetCommunityList(uint(ownerId))
+	rsp, err := dao.GetCommunityList(uint(req.UserId))
 	if err != nil {
 		zap.S().Info("获取群列表失败", err)
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "你还没加入任何群聊",
-		})
+		common.Error(ctx, -1, "你还没加入任何群聊")
 		return
 	}
 
-	common.RespOKList(ctx.Writer, rsp, len(*rsp))
+	common.SuccessWithTotal(ctx, rsp, len(*rsp), "获取群列表成功")
 }
 
 // JoinGroup 加入群聊
 func JoinGroup(ctx *gin.Context) {
-	comInfo := ctx.PostForm("comId")
-	if comInfo == "" {
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "群名称不能为空",
-		})
+	var req common.JoinGroupRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(ctx, "参数格式错误: "+err.Error())
 		return
 	}
 
-	user := ctx.PostForm("userId")
-	userId, err := strconv.Atoi(user)
-	if err != nil {
-		zap.S().Info("user类型转换失败")
-	}
-	if userId == 0 {
-		ctx.JSON(200, gin.H{
-			"code":    -1, //  0成功   -1失败
-			"message": "你未登录",
-		})
+	if req.ComId == "" {
+		common.Error(ctx, -1, "群名称不能为空")
 		return
 	}
 
-	code, err := dao.JoinCommunity(uint(userId), comInfo)
+	if req.UserId == 0 {
+		common.Error(ctx, -1, "你未登录")
+		return
+	}
+
+	code, err := dao.JoinCommunity(uint(req.UserId), req.ComId)
 	if err != nil {
 		HandleErr(code, ctx, err)
 		return
 	}
 
-	ctx.JSON(200, gin.H{
-		"code":    0, //  0成功   -1失败
-		"message": "加群成功",
-	})
+	common.Success(ctx, nil, "加群成功")
 }
 
+// RedisMsg 获取历史消息
 func RedisMsg(c *gin.Context) {
-	userIdA, _ := strconv.Atoi(c.PostForm("userIdA"))
-	userIdB, _ := strconv.Atoi(c.PostForm("userIdB"))
-	start, _ := strconv.Atoi(c.PostForm("start"))
-	end, _ := strconv.Atoi(c.PostForm("end"))
-	isRev, _ := strconv.ParseBool(c.PostForm("isRev"))
-	res := dao.GetUnreadMsg(c, int64(userIdA), int64(userIdB), int64(start), int64(end), isRev)
-	common.RespOKList(c.Writer, "ok", res)
+	var req common.RedisMsgRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.BadRequest(c, "参数格式错误: "+err.Error())
+		return
+	}
+
+	res := dao.GetUnreadMsg(c, req.UserId, req.UserIdB, req.Start, req.End, req.IsRev)
+	common.SuccessWithTotal(c, res, len(res), "获取历史消息成功")
 }

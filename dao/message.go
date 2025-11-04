@@ -791,7 +791,7 @@ func handleUDPDataPacket(pkt *UDPPacket, conn *net.UDPConn, addr *net.UDPAddr) {
 		udpReceiver.LastAckSeq = seq
 
 		// 处理消息
-		dispatch(pkt.Data)
+		Dispatch(pkt.Data)
 
 		// 检查缓冲区中是否有连续的包可以处理
 		for {
@@ -802,7 +802,7 @@ func handleUDPDataPacket(pkt *UDPPacket, conn *net.UDPConn, addr *net.UDPAddr) {
 			udpReceiver.ExpectedSeq++
 			udpReceiver.LastAckSeq = nextPkt.Seq
 			delete(udpReceiver.Buffer, nextPkt.Seq)
-			dispatch(nextPkt.Data)
+			Dispatch(nextPkt.Data)
 		}
 
 		// 发送ACK
@@ -894,7 +894,7 @@ func udpOrderedProcessor() {
 			udpReceiver.ExpectedSeq++
 			udpReceiver.LastAckSeq = nextPkt.Seq
 			delete(udpReceiver.Buffer, nextPkt.Seq)
-			dispatch(nextPkt.Data)
+			Dispatch(nextPkt.Data)
 			processed = true
 		}
 
@@ -907,7 +907,7 @@ func udpOrderedProcessor() {
 }
 
 // dispatch 解析消息，聊天类型判断
-func dispatch(data []byte) {
+func Dispatch(data []byte) {
 	//解析消息
 	msg := models.Message{}
 	err := json.Unmarshal(data, &msg)
