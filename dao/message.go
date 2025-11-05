@@ -187,28 +187,40 @@ func initUDPReceiver() {
 	}
 }
 
-// Chat    需要 ：发送者ID ，接受者ID ，消息类型，发送的内容，发送类型
+// Chat 建立WebSocket连接
+// 参数：
+//   - userId: 连接的用户ID（发送者），通过Query参数传入
+//
+// 说明：
+//   - 接收者ID（targetId）在客户端发送消息时，在消息的JSON中指定
+//   - 消息类型、内容等也是在客户端发送消息时动态指定
 func Chat(w http.ResponseWriter, r *http.Request) {
-	// 1.  获取参数信息发送者userId
+	// 1. 获取连接用户的ID（发送者）
 	query := r.URL.Query()
 	Id := query.Get("userId")
 	userId, err := strconv.ParseInt(Id, 10, 64)
 	if err != nil {
-		zap.S().Info("类型转换失败", err)
+		zap.S().Error("WebSocket连接：userId类型转换失败", "userId", Id, zap.Error(err))
+		http.Error(w, "Invalid userId", http.StatusBadRequest)
 		return
 	}
+
+	zap.S().Info("WebSocket连接请求", "userId", userId, "remoteAddr", r.RemoteAddr)
 
 	// update to websocket
 	//升级为socket
 	conn, err := (&websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			return true
+			return true // 允许所有来源（生产环境应该检查来源）
 		},
 	}).Upgrade(w, r, nil)
 	if err != nil {
-		fmt.Println(err)
+		zap.S().Error("WebSocket升级失败", "userId", userId, zap.Error(err))
+		// Upgrade失败时，Upgrader已经处理了HTTP响应，这里只需要记录日志
 		return
 	}
+
+	zap.S().Info("WebSocket连接已建立", "userId", userId)
 
 	// 获取群列表
 	comIds, err := GetCommunityList(uint(userId))
@@ -319,16 +331,17 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		heartbeatProc(node, userId)
 	}()
 
-	// 发送欢迎消息
+	// 发送欢迎消息（不需要确认，直接发送）
 	welcomeMsg := models.Message{
 		FromId:   0,
 		TargetId: userId,
 		Type:     models.SingleMessageType,
 		Content:  "欢迎进入聊天系统",
-		Seq:      generateSeq(node),
+		Seq:      0, // 欢迎消息不需要序号，不需要确认
 	}
 	welcomeData, _ := json.Marshal(welcomeMsg)
-	sendMsg(userId, welcomeData)
+	// 直接发送，不通过sendMsg（避免加入待确认列表）
+	node.DataQueue <- welcomeData
 
 	// 8. 等待任一协程结束
 	<-done
@@ -364,10 +377,10 @@ func sendProc(node *models.Node, userId int64) {
 			// 解析消息获取序号
 			var msg models.Message
 			if err := json.Unmarshal(data, &msg); err != nil {
-				zap.S().Warn("解析消息失败，跳过确认机制", err)
+				zap.S().Warn("解析消息失败，跳过确认机制", zap.Error(err))
 				// 如果解析失败，直接发送（可能是心跳消息等）
 				if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
-					zap.S().Error("写入消息失败", err)
+					zap.S().Error("写入消息失败", zap.Error(err))
 					return
 				}
 			}
@@ -375,29 +388,31 @@ func sendProc(node *models.Node, userId int64) {
 			// 如果是心跳消息，直接发送不需要确认
 			if msg.Type == models.HeartBeatMessageType {
 				if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
-					zap.S().Error("写入心跳消息失败", err)
+					zap.S().Error("写入心跳消息失败", zap.Error(err))
 					return
 				}
 			}
 
-			// ACK消息处理：从待确认列表中移除对应的消息
+			// ACK消息处理：从待确认列表中移除对应的消息（ACK是服务器内部消息，不发送给客户端）
 			if msg.Type == models.AckMessageType {
 				if msg.TargetId == userId || msg.TargetId == 0 {
-					// 从待确认列表中移除
+					// 这是发给当前用户的ACK，从待确认列表中移除
 					node.SeqMutex.Lock()
 					if _, exists := node.PendingMsgs[msg.Seq]; exists {
 						delete(node.PendingMsgs, msg.Seq)
 						zap.S().Debugf("收到ACK确认，移除待确认消息 seq=%d", msg.Seq)
+					} else {
+						zap.S().Debugf("收到ACK确认，但对应的消息不在待确认列表中 seq=%d", msg.Seq)
 					}
 					node.SeqMutex.Unlock()
 				} else {
-					// ACK需要路由到其他发送方Node
+					// ACK需要路由到其他发送方Node（TargetId是原始发送方）
 					rwLocker.RLock()
 					targetNode, exists := clientMap[msg.TargetId]
 					rwLocker.RUnlock()
 
 					if exists {
-						// 发送给发送方的DataQueue
+						// 发送给发送方的DataQueue，由发送方的sendProc处理
 						select {
 						case targetNode.DataQueue <- data:
 							zap.S().Debugf("ACK消息已路由到发送方 userId=%d", msg.TargetId)
@@ -408,6 +423,8 @@ func sendProc(node *models.Node, userId int64) {
 						zap.S().Warnf("ACK目标用户不在线 userId=%d", msg.TargetId)
 					}
 				}
+				// ACK是服务器内部消息，不发送给WebSocket客户端
+				continue
 			}
 
 			// 为需要确认的消息分配序号（如果还没有）
@@ -418,12 +435,13 @@ func sendProc(node *models.Node, userId int64) {
 
 			// 发送消息
 			if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				zap.S().Error("写入消息失败", err)
+				zap.S().Error("写入消息失败", zap.Error(err))
 				return
 			}
 
-			// 将消息加入待确认列表（需要确认的消息）
-			if msg.Type == models.SingleMessageType || msg.Type == models.CommunityMessageType {
+			// 将消息加入待确认列表（需要确认的消息，且序号不为0）
+			// 注意：FromId=0的消息（如欢迎消息）不需要确认
+			if (msg.Type == models.SingleMessageType || msg.Type == models.CommunityMessageType) && msg.Seq > 0 && msg.FromId != 0 {
 				node.SeqMutex.Lock()
 				node.PendingMsgs[msg.Seq] = data
 				node.LastSentSeq = msg.Seq
@@ -456,7 +474,7 @@ func recProc(node *models.Node, userId int64) {
 		_, data, err := node.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				zap.S().Error("读取消息失败", err)
+				zap.S().Error("读取消息失败", zap.Error(err))
 			}
 			return
 		}
@@ -505,49 +523,59 @@ func recProc(node *models.Node, userId int64) {
 
 		// 处理普通消息
 		if msg.Type == models.SingleMessageType || msg.Type == models.CommunityMessageType {
-			// 如果消息没有序号（客户端发送的），分配序号
-			if msg.Seq == 0 {
-				msg.Seq = generateSeq(node)
-				// 更新FromId为当前用户（客户端发送的消息）
-				msg.FromId = userId
-				var err error
-				data, err = json.Marshal(msg)
-				if err != nil {
-					zap.S().Error("重新序列化消息失败", err)
-					continue
-				}
-			}
+			// 判断消息是客户端发送的（FromId == userId 或 FromId == 0），还是服务器转发的（FromId != userId）
+			isClientSent := msg.FromId == userId || msg.FromId == 0
 
-			// 检查消息序号，防止重复处理（仅对已有序号的消息）
-			if msg.Seq > 0 {
-				if msg.Seq <= node.LastReceivedSeq {
-					zap.S().Warnf("收到重复消息 seq=%d, 已处理序号=%d", msg.Seq, node.LastReceivedSeq)
-					// 即使重复，也要发送ACK（避免发送方一直重发）
-				} else {
-					node.LastReceivedSeq = msg.Seq
+			if isClientSent {
+				// 这是客户端发送的消息，需要路由给目标用户
+				// 如果消息没有序号，分配序号
+				if msg.Seq == 0 {
+					msg.Seq = generateSeq(node)
+					// 确保FromId设置为当前用户（发送者）
+					msg.FromId = userId
+					var err error
+					data, err = json.Marshal(msg)
+					if err != nil {
+						zap.S().Error("重新序列化消息失败", zap.Error(err))
+						continue
+					}
 				}
+				// 客户端发送的消息，直接转发给目标用户，不需要ACK和序号检查
+				Dispatch(data)
+			} else {
+				// 这是服务器转发的消息（从其他用户接收到的）
+				// 检查消息序号，防止重复处理（仅对已有序号的消息）
+				if msg.Seq > 0 {
+					if msg.Seq <= node.LastReceivedSeq {
+						zap.S().Warnf("收到重复消息 seq=%d, 已处理序号=%d", msg.Seq, node.LastReceivedSeq)
+						// 即使重复，也要发送ACK（避免发送方一直重发）
+					} else {
+						node.LastReceivedSeq = msg.Seq
+					}
 
-				// 发送ACK确认，TargetId指向原始发送方
-				// 注意：如果消息是从客户端来的（FromId == userId），ACK不需要路由
-				// 如果消息是服务器转发的（FromId != userId），ACK需要路由到FromId
-				ackMsg := models.Message{
-					Type:     models.AckMessageType,
-					Seq:      msg.Seq,
-					FromId:   userId,     // 当前用户（接收方）
-					TargetId: msg.FromId, // 原始发送方
-					Content:  "ack",
+					// 发送ACK确认，TargetId指向原始发送方
+					ackMsg := models.Message{
+						Type:     models.AckMessageType,
+						Seq:      msg.Seq,
+						FromId:   userId,     // 当前用户（接收方）
+						TargetId: msg.FromId, // 原始发送方
+						Content:  "ack",
+					}
+					ackData, _ := json.Marshal(ackMsg)
+					select {
+					case node.DataQueue <- ackData:
+					default:
+						zap.S().Warn("ACK确认队列已满")
+					}
 				}
-				ackData, _ := json.Marshal(ackMsg)
-				select {
-				case node.DataQueue <- ackData:
-				default:
-					zap.S().Warn("ACK确认队列已满")
-				}
+				// 服务器转发的消息，直接显示给当前用户（已经在sendMsgAndSave中放入DataQueue）
+				// 不需要再次Dispatch，避免重复处理
 			}
+			continue
 		}
 
-		// 转发消息到处理逻辑
-		broMsg(data)
+		// 其他类型的消息（心跳、ACK等）不处理，已在上面处理
+		zap.S().Warnf("未知消息类型或已处理: type=%d", msg.Type)
 	}
 }
 
@@ -618,11 +646,12 @@ func retryPendingMsgs(node *models.Node, userId int64) {
 
 	// 重发未确认消息
 	for seq, msgData := range pendingCopy {
-		zap.S().Warnf("重发未确认消息 userId=%d, seq=%d", userId, seq)
+		// 重发是正常机制，使用Debug级别
+		zap.S().Debugf("重发未确认消息 userId=%d, seq=%d", userId, seq)
 
 		// 直接写入连接，不经过队列避免重复
 		if err := node.Conn.WriteMessage(websocket.TextMessage, msgData); err != nil {
-			zap.S().Errorf("重发消息失败 userId=%d, seq=%d, err=%v", userId, seq, err)
+			zap.S().Errorf("重发消息失败 userId=%d, seq=%d", userId, seq, zap.Error(err))
 			// 如果重发失败，可能连接已断开，从待确认列表移除
 			node.SeqMutex.Lock()
 			delete(node.PendingMsgs, seq)
@@ -637,7 +666,7 @@ func UdpSendProc() {
 
 	udpConn, err := net.DialUDP("udp", nil, UDPListenAddr)
 	if err != nil {
-		zap.S().Error("UDP拨号失败", err)
+		zap.S().Error("UDP拨号失败", zap.Error(err))
 		return
 	}
 	defer udpConn.Close()
@@ -718,9 +747,10 @@ func udpRetransmitWorker(conn *net.UDPConn) {
 
 			_, err = conn.Write(packetData)
 			if err != nil {
-				zap.S().Errorf("重传UDP包失败 seq=%d", pkt.Seq, err)
+				zap.S().Errorf("重传UDP包失败 seq=%d", pkt.Seq, zap.Error(err))
 			} else {
-				zap.S().Warnf("重传UDP包 seq=%d", pkt.Seq)
+				// UDP重传是正常机制，使用Debug级别
+				zap.S().Debugf("重传UDP包 seq=%d", pkt.Seq)
 			}
 		}
 	}

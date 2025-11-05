@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 var (
@@ -51,56 +51,85 @@ func GenerateToken(userId uint, iss string) (string, error) {
 // 鉴权
 func JWY() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		// 判断是否是WebSocket升级请求
+		isWebSocket := ctx.GetHeader("Upgrade") == "websocket" || ctx.GetHeader("Connection") == "Upgrade"
+
 		// 优先从Authorization header获取token
 		token := ""
 		authHeader := ctx.GetHeader("Authorization")
 		if authHeader != "" && len(authHeader) > 7 && authHeader[:7] == "Bearer " {
 			token = authHeader[7:]
-		} else {
-			// 兼容旧方式：从PostForm获取
+		}
+
+		// WebSocket连接时，优先从Query参数获取token
+		if isWebSocket && token == "" {
+			token = ctx.Query("token")
+		}
+
+		// 如果不是WebSocket，尝试从PostForm获取token（兼容旧方式）
+		if !isWebSocket && token == "" {
 			token = ctx.PostForm("token")
 		}
 
-		// 从JSON body获取userId（如果使用JSON请求）
+		// 从Query参数获取userId（WebSocket连接和GET请求使用）
 		var userId int
 		var err error
-
-		contentType := ctx.GetHeader("Content-Type")
-		if contentType == "application/json" {
-			// 读取原始body
-			bodyBytes, _ := ctx.GetRawData()
-			if len(bodyBytes) > 0 {
-				// 解析JSON获取userId
-				var reqBody struct {
-					UserId int64 `json:"userId"`
-				}
-				if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
-					userId = int(reqBody.UserId)
-				}
-				// 恢复body供后续handler使用
-				ctx.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			}
-		}
-
-		// 如果JSON解析失败，尝试从PostForm获取（兼容旧方式）
-		if userId == 0 {
-			user := ctx.PostForm("userId")
-			if user != "" {
-				userId, err = strconv.Atoi(user)
-				if err != nil {
-					ctx.JSON(http.StatusUnauthorized, map[string]string{
-						"message": "user id unauthorized",
-					})
-					ctx.Abort()
-					return
-				}
-			} else {
+		user := ctx.Query("userId")
+		if user != "" {
+			userId, err = strconv.Atoi(user)
+			if err != nil {
+				zap.S().Warn("WebSocket连接：userId格式错误", "userId", user, "error", err)
 				ctx.JSON(http.StatusUnauthorized, map[string]string{
 					"message": "user id unauthorized",
 				})
 				ctx.Abort()
 				return
 			}
+		}
+
+		// 如果不是WebSocket请求，尝试从JSON body或PostForm获取userId
+		if !isWebSocket && userId == 0 {
+			contentType := ctx.GetHeader("Content-Type")
+			if contentType == "application/json" {
+				// 读取原始body
+				bodyBytes, _ := ctx.GetRawData()
+				if len(bodyBytes) > 0 {
+					// 解析JSON获取userId
+					var reqBody struct {
+						UserId int64 `json:"userId"`
+					}
+					if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
+						userId = int(reqBody.UserId)
+					}
+					// 恢复body供后续handler使用
+					ctx.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+				}
+			}
+
+			// 如果JSON解析失败，尝试从PostForm获取（兼容旧方式）
+			if userId == 0 {
+				user := ctx.PostForm("userId")
+				if user != "" {
+					userId, err = strconv.Atoi(user)
+					if err != nil {
+						ctx.JSON(http.StatusUnauthorized, map[string]string{
+							"message": "user id unauthorized",
+						})
+						ctx.Abort()
+						return
+					}
+				}
+			}
+		}
+
+		// 如果userId还是0，返回错误
+		if userId == 0 {
+			zap.S().Warn("JWT验证失败：userId为空", "isWebSocket", isWebSocket)
+			ctx.JSON(http.StatusUnauthorized, map[string]string{
+				"message": "user id unauthorized",
+			})
+			ctx.Abort()
+			return
 		}
 
 		if token == "" {
@@ -139,7 +168,7 @@ func JWY() gin.HandlerFunc {
 		// 将用户ID存储到context中，供后续handler使用
 		ctx.Set("userId", uint(userId))
 
-		fmt.Println("login is valid, welcome !")
+		zap.S().Debug("JWT验证成功，用户已登录", "userId", userId)
 		// 继续执行后面的 handler
 		ctx.Next()
 	}
