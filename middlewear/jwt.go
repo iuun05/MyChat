@@ -64,7 +64,7 @@ func JWY() gin.HandlerFunc {
 		// 从JSON body获取userId（如果使用JSON请求）
 		var userId int
 		var err error
-		
+
 		contentType := ctx.GetHeader("Content-Type")
 		if contentType == "application/json" {
 			// 读取原始body
@@ -81,7 +81,7 @@ func JWY() gin.HandlerFunc {
 				ctx.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			}
 		}
-		
+
 		// 如果JSON解析失败，尝试从PostForm获取（兼容旧方式）
 		if userId == 0 {
 			user := ctx.PostForm("userId")
@@ -138,7 +138,7 @@ func JWY() gin.HandlerFunc {
 
 		// 将用户ID存储到context中，供后续handler使用
 		ctx.Set("userId", uint(userId))
-		
+
 		fmt.Println("login is valid, welcome !")
 		// 继续执行后面的 handler
 		ctx.Next()
