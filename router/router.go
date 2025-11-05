@@ -5,11 +5,23 @@ import (
 	"MyChat/service"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 func Router() *gin.Engine {
 	//初始化路由
-	router := gin.Default()
+	// 使用gin.New()代替gin.Default()，以便自定义Recovery中间件
+	router := gin.New()
+
+	// 自定义Recovery中间件，不输出堆栈信息
+	router.Use(gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
+		// 只记录错误，不输出堆栈
+		zap.S().Errorf("panic recovered: %v", recovered)
+		c.AbortWithStatus(500)
+	}))
+
+	// 使用自定义Logger中间件（可选，如果不需要可以注释掉）
+	router.Use(gin.Logger())
 
 	// 健康检查端点
 	router.GET("/health", func(c *gin.Context) {

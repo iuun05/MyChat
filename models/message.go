@@ -52,6 +52,9 @@ type Node struct {
 	PendingMsgs     map[int64][]byte //待确认消息 (seq -> msg)
 	LastSentSeq     int64            //最后发送的消息序号（每个Node独立）
 	LastReceivedSeq int64            //最后收到的消息序号
+	ExpectedSeq     int64            //期望的下一个接收序号（用于排序）
+	ReceivedBuffer  map[int64][]byte //接收消息缓冲区 (seq -> msg)，用于乱序重组
+	SentSeqSet      set.Interface    //已发送的序号集合（用于发送方去重）
 	SeqGenerator    int64            //序号生成器（每个Node独立，避免全局竞争）
 	SeqMutex        sync.Mutex       //序号生成器锁
 	HeartbeatTicker *time.Ticker     //心跳定时器

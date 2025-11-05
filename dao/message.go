@@ -232,16 +232,25 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 	node := &models.Node{
 		Conn:            conn,
 		Addr:            r.RemoteAddr,
-		DataQueue:       make(chan []byte, 50),
+		DataQueue:       make(chan []byte, 256), // 增大队列容量，减少阻塞
 		GroupSets:       set.New(set.ThreadSafe),
 		LastHeartbeat:   time.Now(),
 		PendingMsgs:     make(map[int64][]byte),
 		LastSentSeq:     0,
 		LastReceivedSeq: 0,
+		ExpectedSeq:     1, // 期望的接收序号从1开始
+		ReceivedBuffer:  make(map[int64][]byte),
+		SentSeqSet:      set.New(set.ThreadSafe),
 		SeqGenerator:    0,
 		HeartbeatTicker: time.NewTicker(HeartbeatInterval),
 		CloseChan:       make(chan struct{}),
 	}
+
+	// 启动消息顺序处理协程（用于处理乱序到达的消息）
+	go orderedMessageProcessor(node, userId)
+
+	// 设置写入超时，避免阻塞
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
 	// 添加群组到 GroupSets
 	for _, com := range *comIds {
@@ -285,9 +294,10 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		// 关闭关闭信号通道
 		close(node.CloseChan)
 
-		// 清理待确认消息
+		// 清理待确认消息和缓冲区
 		node.SeqMutex.Lock()
 		node.PendingMsgs = make(map[int64][]byte)
+		node.ReceivedBuffer = make(map[int64][]byte)
 		node.SeqMutex.Unlock()
 
 		conn.Close()
@@ -366,6 +376,20 @@ func sendProc(node *models.Node, userId int64) {
 	ticker := time.NewTicker(RetryInterval)
 	defer ticker.Stop()
 
+	// 单独的重发协程，避免阻塞主循环
+	retryTicker := time.NewTicker(RetryInterval)
+	defer retryTicker.Stop()
+	go func() {
+		for {
+			select {
+			case <-retryTicker.C:
+				retryPendingMsgs(node, userId)
+			case <-node.CloseChan:
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
 		case data, ok := <-node.DataQueue:
@@ -374,15 +398,17 @@ func sendProc(node *models.Node, userId int64) {
 				return
 			}
 
+			node.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+
 			// 解析消息获取序号
 			var msg models.Message
 			if err := json.Unmarshal(data, &msg); err != nil {
 				zap.S().Warn("解析消息失败，跳过确认机制", zap.Error(err))
-				// 如果解析失败，直接发送（可能是心跳消息等）
 				if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
 					zap.S().Error("写入消息失败", zap.Error(err))
 					return
 				}
+				continue
 			}
 
 			// 如果是心跳消息，直接发送不需要确认
@@ -391,10 +417,8 @@ func sendProc(node *models.Node, userId int64) {
 					zap.S().Error("写入心跳消息失败", zap.Error(err))
 					return
 				}
-			}
-
-			// ACK消息处理：从待确认列表中移除对应的消息（ACK是服务器内部消息，不发送给客户端）
-			if msg.Type == models.AckMessageType {
+				continue
+			} else if msg.Type == models.AckMessageType {
 				if msg.TargetId == userId || msg.TargetId == 0 {
 					// 这是发给当前用户的ACK，从待确认列表中移除
 					node.SeqMutex.Lock()
@@ -423,8 +447,6 @@ func sendProc(node *models.Node, userId int64) {
 						zap.S().Warnf("ACK目标用户不在线 userId=%d", msg.TargetId)
 					}
 				}
-				// ACK是服务器内部消息，不发送给WebSocket客户端
-				continue
 			}
 
 			// 为需要确认的消息分配序号（如果还没有）
@@ -433,30 +455,85 @@ func sendProc(node *models.Node, userId int64) {
 				data, _ = json.Marshal(msg)
 			}
 
+			// 发送方去重：检查是否已发送过相同序号的消息
+			if (msg.Type == models.SingleMessageType || msg.Type == models.CommunityMessageType) && msg.Seq > 0 && msg.FromId != 0 {
+				node.SeqMutex.Lock()
+				// 检查是否已发送过该序号的消息
+				if node.SentSeqSet.Has(msg.Seq) {
+					node.SeqMutex.Unlock()
+					zap.S().Debugf("消息已发送过，跳过重复发送 seq=%d, userId=%d", msg.Seq, userId)
+					continue // 跳过重复消息，不发送
+				}
+				// 记录已发送的序号
+				node.SentSeqSet.Add(msg.Seq)
+				node.SeqMutex.Unlock()
+			}
+
 			// 发送消息
 			if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
 				zap.S().Error("写入消息失败", zap.Error(err))
 				return
 			}
 
-			// 将消息加入待确认列表（需要确认的消息，且序号不为0）
-			// 注意：FromId=0的消息（如欢迎消息）不需要确认
 			if (msg.Type == models.SingleMessageType || msg.Type == models.CommunityMessageType) && msg.Seq > 0 && msg.FromId != 0 {
 				node.SeqMutex.Lock()
 				node.PendingMsgs[msg.Seq] = data
-				node.LastSentSeq = msg.Seq
+				if msg.Seq > node.LastSentSeq {
+					node.LastSentSeq = msg.Seq
+				}
 				pendingCount := len(node.PendingMsgs)
 				node.SeqMutex.Unlock()
 
 				zap.S().Debugf("消息已发送，等待确认 seq=%d, 待确认消息数=%d", msg.Seq, pendingCount)
 			}
 
-		case <-ticker.C:
-			// 定时检查并重发未确认消息
-			retryPendingMsgs(node, userId)
-
 		case <-node.CloseChan:
 			zap.S().Debug("收到关闭信号，退出发送协程")
+			return
+		}
+	}
+}
+
+// orderedMessageProcessor 顺序处理接收缓冲区的消息（处理乱序到达的消息）
+func orderedMessageProcessor(node *models.Node, userId int64) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			node.SeqMutex.Lock()
+
+			// 检查是否有连续的包可以处理
+			processed := false
+			for {
+				nextData, exists := node.ReceivedBuffer[node.ExpectedSeq]
+				if !exists {
+					break
+				}
+
+				delete(node.ReceivedBuffer, node.ExpectedSeq)
+				seq := node.ExpectedSeq
+				node.ExpectedSeq++
+				node.LastReceivedSeq = seq
+				processed = true
+
+				// 处理消息（消息已经在sendMsgAndSave中处理过，这里只需要更新状态）
+				node.SeqMutex.Unlock()
+				var msg models.Message
+				if err := json.Unmarshal(nextData, &msg); err == nil {
+					zap.S().Debugf("从缓冲区顺序处理消息 seq=%d, fromId=%d, userId=%d", seq, msg.FromId, userId)
+				}
+				node.SeqMutex.Lock()
+			}
+
+			node.SeqMutex.Unlock()
+
+			if processed {
+				zap.S().Debugf("顺序处理了缓冲区的消息，当前期望seq=%d, userId=%d", node.ExpectedSeq, userId)
+			}
+
+		case <-node.CloseChan:
 			return
 		}
 	}
@@ -503,31 +580,18 @@ func recProc(node *models.Node, userId int64) {
 			default:
 				zap.S().Warn("心跳响应队列已满")
 			}
-			continue
-		}
-
-		// 处理ACK确认消息（从客户端接收的ACK）
-		// ACK由接收方（当前node）发送，TargetId指向原始发送方
-		// 需要将ACK路由到TargetId对应的Node，由sendProc处理
-		if msg.Type == models.AckMessageType {
-			// ACK应该转发到sendProc进行路由处理
-			// 直接放入DataQueue，由sendProc路由到发送方
+		} else if msg.Type == models.AckMessageType {
 			select {
 			case node.DataQueue <- data:
 				zap.S().Debugf("ACK消息已放入队列等待路由 seq=%d", msg.Seq)
 			default:
 				zap.S().Warn("ACK确认队列已满")
 			}
-			continue
-		}
-
-		// 处理普通消息
-		if msg.Type == models.SingleMessageType || msg.Type == models.CommunityMessageType {
+		} else if msg.Type == models.SingleMessageType || msg.Type == models.CommunityMessageType {
 			// 判断消息是客户端发送的（FromId == userId 或 FromId == 0），还是服务器转发的（FromId != userId）
 			isClientSent := msg.FromId == userId || msg.FromId == 0
 
 			if isClientSent {
-				// 这是客户端发送的消息，需要路由给目标用户
 				// 如果消息没有序号，分配序号
 				if msg.Seq == 0 {
 					msg.Seq = generateSeq(node)
@@ -540,25 +604,98 @@ func recProc(node *models.Node, userId int64) {
 						continue
 					}
 				}
-				// 客户端发送的消息，直接转发给目标用户，不需要ACK和序号检查
+
 				Dispatch(data)
 			} else {
-				// 这是服务器转发的消息（从其他用户接收到的）
-				// 检查消息序号，防止重复处理（仅对已有序号的消息）
 				if msg.Seq > 0 {
+					node.SeqMutex.Lock()
 					if msg.Seq <= node.LastReceivedSeq {
-						zap.S().Warnf("收到重复消息 seq=%d, 已处理序号=%d", msg.Seq, node.LastReceivedSeq)
-						// 即使重复，也要发送ACK（避免发送方一直重发）
-					} else {
-						node.LastReceivedSeq = msg.Seq
+						node.SeqMutex.Unlock()
+						zap.S().Debugf("收到重复消息（已处理），只发送ACK seq=%d, 已处理序号=%d, userId=%d", msg.Seq, node.LastReceivedSeq, userId)
+						// 重复消息：只发送ACK，不处理
+						ackMsg := models.Message{
+							Type:     models.AckMessageType,
+							Seq:      msg.Seq,
+							FromId:   userId,
+							TargetId: msg.FromId,
+							Content:  "ack",
+						}
+						ackData, _ := json.Marshal(ackMsg)
+						select {
+						case node.DataQueue <- ackData:
+						default:
+							zap.S().Warn("ACK确认队列已满")
+						}
+						continue
 					}
 
-					// 发送ACK确认，TargetId指向原始发送方
+					// 检查是否在缓冲区中（已收到但未处理的乱序消息）
+					if _, exists := node.ReceivedBuffer[msg.Seq]; exists {
+						node.SeqMutex.Unlock()
+						zap.S().Debugf("消息已在缓冲区中（乱序），只发送ACK seq=%d, userId=%d", msg.Seq, userId)
+						// 已在缓冲区，只发送ACK
+						ackMsg := models.Message{
+							Type:     models.AckMessageType,
+							Seq:      msg.Seq,
+							FromId:   userId,
+							TargetId: msg.FromId,
+							Content:  "ack",
+						}
+						ackData, _ := json.Marshal(ackMsg)
+						select {
+						case node.DataQueue <- ackData:
+						default:
+							zap.S().Warn("ACK确认队列已满")
+						}
+						continue
+					}
+
+					// 新消息：根据序号决定是直接处理还是放入缓冲区
+					if msg.Seq == node.ExpectedSeq {
+						// 正好是期望的序号，直接处理
+						node.ExpectedSeq++
+						node.LastReceivedSeq = msg.Seq
+
+						// 处理连续的消息（从缓冲区中取出）
+						msgsToProcess := [][]byte{data} // 包含当前消息
+						for {
+							if nextData, exists := node.ReceivedBuffer[node.ExpectedSeq]; exists {
+								delete(node.ReceivedBuffer, node.ExpectedSeq)
+								msgsToProcess = append(msgsToProcess, nextData)
+								node.ExpectedSeq++
+								node.LastReceivedSeq = node.ExpectedSeq - 1
+							} else {
+								break
+							}
+						}
+						node.SeqMutex.Unlock()
+
+						// 按顺序处理所有连续的消息（保存到Redis并放入DataQueue）
+						for _, msgData := range msgsToProcess {
+							var processedMsg models.Message
+							if err := json.Unmarshal(msgData, &processedMsg); err == nil {
+								zap.S().Debugf("顺序处理消息 seq=%d, fromId=%d, userId=%d", processedMsg.Seq, processedMsg.FromId, userId)
+								// 调用sendMsgAndSave处理消息（保存并放入队列）
+								sendMsgAndSave(userId, msgData)
+							}
+						}
+					} else if msg.Seq > node.ExpectedSeq {
+						// 乱序消息：序号大于期望序号，放入缓冲区等待（不处理，等序号到后再处理）
+						node.ReceivedBuffer[msg.Seq] = data
+						node.SeqMutex.Unlock()
+						zap.S().Debugf("收到乱序消息，放入缓冲区 seq=%d, 期望序号=%d, userId=%d", msg.Seq, node.ExpectedSeq, userId)
+					} else {
+						// 序号小于期望序号（不应该发生，因为已检查过重复）
+						node.SeqMutex.Unlock()
+						zap.S().Warnf("收到异常序号消息 seq=%d, 期望序号=%d, userId=%d", msg.Seq, node.ExpectedSeq, userId)
+					}
+
+					// 发送ACK确认（无论是否处理）
 					ackMsg := models.Message{
 						Type:     models.AckMessageType,
 						Seq:      msg.Seq,
-						FromId:   userId,     // 当前用户（接收方）
-						TargetId: msg.FromId, // 原始发送方
+						FromId:   userId,
+						TargetId: msg.FromId,
 						Content:  "ack",
 					}
 					ackData, _ := json.Marshal(ackMsg)
@@ -567,9 +704,11 @@ func recProc(node *models.Node, userId int64) {
 					default:
 						zap.S().Warn("ACK确认队列已满")
 					}
+				} else {
+					// 没有序号的消息，直接处理（不发送ACK，不进行去重排序）
+					zap.S().Warnf("收到没有序号的消息 FromId=%d, TargetId=%d", msg.FromId, msg.TargetId)
+					sendMsgAndSave(userId, data)
 				}
-				// 服务器转发的消息，直接显示给当前用户（已经在sendMsgAndSave中放入DataQueue）
-				// 不需要再次Dispatch，避免重复处理
 			}
 			continue
 		}
@@ -629,6 +768,7 @@ func heartbeatProc(node *models.Node, userId int64) {
 }
 
 // retryPendingMsgs 重发待确认消息
+// 注意：重发消息必须通过DataQueue，由sendProc统一写入，避免并发写入WebSocket连接
 func retryPendingMsgs(node *models.Node, userId int64) {
 	node.SeqMutex.Lock()
 	pendingCount := len(node.PendingMsgs)
@@ -637,25 +777,27 @@ func retryPendingMsgs(node *models.Node, userId int64) {
 		return
 	}
 
-	// 复制待确认消息列表
 	pendingCopy := make(map[int64][]byte)
 	for seq, msg := range node.PendingMsgs {
 		pendingCopy[seq] = msg
 	}
 	node.SeqMutex.Unlock()
 
-	// 重发未确认消息
+	// 这样可以避免并发写入WebSocket连接（WebSocket不支持并发写入）
 	for seq, msgData := range pendingCopy {
-		// 重发是正常机制，使用Debug级别
+
 		zap.S().Debugf("重发未确认消息 userId=%d, seq=%d", userId, seq)
 
-		// 直接写入连接，不经过队列避免重复
-		if err := node.Conn.WriteMessage(websocket.TextMessage, msgData); err != nil {
-			zap.S().Errorf("重发消息失败 userId=%d, seq=%d", userId, seq, zap.Error(err))
-			// 如果重发失败，可能连接已断开，从待确认列表移除
-			node.SeqMutex.Lock()
-			delete(node.PendingMsgs, seq)
-			node.SeqMutex.Unlock()
+		// 通过DataQueue发送，由sendProc统一处理，避免并发写入
+		select {
+		case node.DataQueue <- msgData:
+			// 成功放入队列
+		case <-node.CloseChan:
+			// 连接已关闭，退出重发
+			return
+		default:
+			// 队列已满，记录警告但继续尝试其他消息
+			zap.S().Warnf("重发消息队列已满，跳过重发 userId=%d, seq=%d", userId, seq)
 		}
 	}
 }
@@ -697,14 +839,14 @@ func UdpSendProc() {
 		// 编码包
 		packetData, err := encodeUDPPacket(pkt)
 		if err != nil {
-			zap.S().Error("编码UDP包失败", err)
+			zap.S().Error("编码UDP包失败", zap.Error(err))
 			continue
 		}
 
 		// 发送UDP包
 		_, err = udpConn.Write(packetData)
 		if err != nil {
-			zap.S().Error("发送UDP包失败", err)
+			zap.S().Error("发送UDP包失败", zap.Error(err))
 			continue
 		}
 
@@ -741,7 +883,7 @@ func udpRetransmitWorker(conn *net.UDPConn) {
 		for _, pkt := range packetsToRetry {
 			packetData, err := encodeUDPPacket(pkt)
 			if err != nil {
-				zap.S().Errorf("重传编码UDP包失败 seq=%d", pkt.Seq, err)
+				zap.S().Errorf("重传编码UDP包失败 seq=%d", pkt.Seq, zap.Error(err))
 				continue
 			}
 
@@ -762,7 +904,7 @@ func UpdRecProc() {
 
 	udpConn, err := net.ListenUDP("udp", UDPListenAddr)
 	if err != nil {
-		zap.S().Error("监听UDP端口失败", err)
+		zap.S().Error("监听UDP端口失败", zap.Error(err))
 		return
 	}
 	defer udpConn.Close()
@@ -776,7 +918,7 @@ func UpdRecProc() {
 		buf := make([]byte, 1500) // UDP最大包大小
 		n, addr, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
-			zap.S().Error("读取UDP数据失败", err)
+			zap.S().Error("读取UDP数据失败", zap.Error(err))
 			continue
 		}
 
@@ -894,13 +1036,13 @@ func sendUDPAck(conn *net.UDPConn, addr *net.UDPAddr, ackSeq uint32) {
 
 	packetData, err := encodeUDPPacket(pkt)
 	if err != nil {
-		zap.S().Error("编码UDP ACK包失败", err)
+		zap.S().Error("编码UDP ACK包失败", zap.Error(err))
 		return
 	}
 
 	_, err = conn.WriteToUDP(packetData, addr)
 	if err != nil {
-		zap.S().Error("发送UDP ACK失败", err)
+		zap.S().Error("发送UDP ACK失败", zap.Error(err))
 	} else {
 		zap.S().Debugf("发送UDP ACK ackSeq=%d", ackSeq)
 	}
@@ -949,8 +1091,10 @@ func Dispatch(data []byte) {
 	//判断消息类型
 	switch msg.Type {
 	case models.SingleMessageType: //私聊
+		// 同步处理，保证消息顺序
 		sendMsgAndSave(msg.TargetId, data)
 	case models.CommunityMessageType: //群发
+		// 同步处理群发消息，保证顺序
 		sendGroupMsg(uint(msg.FromId), uint(msg.TargetId), data)
 	case models.HeartBeatMessageType: // 心跳消息已在recProc中处理，这里不做处理
 		zap.S().Debug("收到心跳消息")
@@ -979,29 +1123,23 @@ func sendMsg(id int64, msg []byte) {
 	}
 }
 
-// sendMsgAndSave 发送消息 并存储聊天记录到redis
+// sendMsgAndSave 发送消息并存储聊天记录
+// 数据持久化策略：MySQL为主存储，Redis作为缓存
+// 1. 必须保存到MySQL（持久化，即使失败也要记录）
+// 2. Redis作为缓存，失败不影响消息发送，但会影响性能
+// 3. 消息发送到WebSocket队列
 func sendMsgAndSave(userId int64, msg []byte) {
-	rwLocker.RLock()              //保证线程安全，上锁
-	node, ok := clientMap[userId] //对方是否在线
-	rwLocker.RUnlock()            //解锁
-
 	jsonMsg := models.Message{}
 	if err := json.Unmarshal(msg, &jsonMsg); err != nil {
-		zap.S().Error("[sendMsgAndSave] 消息解析失败", err)
+		zap.S().Error("[sendMsgAndSave] 消息解析失败", zap.Error(err))
 		return
 	}
 
-	// 如果消息没有序号，说明是从客户端来的，需要找到发送方的Node分配序号
 	ctx := context.Background()
 	targetIdStr := strconv.Itoa(int(userId))
 	userIdStr := strconv.Itoa(int(jsonMsg.FromId))
 
-	if ok {
-		//如果当前用户在线，将消息转发到当前用户的websocket连接中，然后进行存储
-		node.DataQueue <- msg
-	}
-
-	//userIdStr和targetIdStr进行拼接唯一key
+	// userIdStr和targetIdStr进行拼接唯一key
 	var key string
 	if userId > jsonMsg.FromId {
 		key = "msg_" + userIdStr + "_" + targetIdStr
@@ -1009,54 +1147,81 @@ func sendMsgAndSave(userId int64, msg []byte) {
 		key = "msg_" + targetIdStr + "_" + userIdStr
 	}
 
-	// ZCARD key 是 Redis 提供的命令，用来 返回指定有序集合中的元素数量。
+	// 保存消息到MySQL
+	if global.DB != nil {
+		if err := global.DB.Create(&jsonMsg).Error; err != nil {
+			zap.S().Error("[sendMsgAndSave] Failed to persist message into MySQL", zap.Error(err))
+		} else {
+			zap.S().Debugf("[sendMsgAndSave] 消息已保存到MySQL seq=%d, fromId=%d, toId=%d", jsonMsg.Seq, jsonMsg.FromId, userId)
+		}
+	} else {
+		zap.S().Warn("[sendMsgAndSave] MySQL数据库连接未初始化，跳过持久化")
+	}
+
+	// 保存消息到Redis ZSet（缓存）
 	count, err := global.RedisDB.ZCard(ctx, key).Result()
 	if err != nil {
-		zap.S().Error("[sendMsgAndSave] Failed to get number of messages ", err)
-		return
+		zap.S().Warnf("[sendMsgAndSave] Failed to get message count from Redis: %v, 继续处理", err)
+		count = 0
 	}
 
+	// 保存消息到Redis ZSet（缓存）
 	score := float64(time.Now().Unix())
-	_, err = global.RedisDB.ZAdd(ctx, key, redis.Z{Score: score, Member: msg}).Result() // redis.Z{Score: score, Member: msg}
-	if err != nil {
-		zap.S().Error("[sendMsgAndSave] Failed to add message to Redis ", err)
-		return
+	memberKey := string(msg)
+	if _, err = global.RedisDB.ZAdd(ctx, key, redis.Z{Score: score, Member: memberKey}).Result(); err != nil {
+		zap.S().Warnf("[sendMsgAndSave] Failed to add message to Redis: %v, 消息已保存到MySQL", err)
+	} else {
+		zap.S().Debugf("[sendMsgAndSave] 消息已保存到Redis缓存 seq=%d", jsonMsg.Seq)
+
+		// 清理旧消息（只保留最近1000条）
+		if count > 1000 {
+			if err := global.RedisDB.ZRemRangeByRank(ctx, key, 0, count-1000).Err(); err != nil {
+				zap.S().Warnf("[sendMsgAndSave] Failed to clean old messages from Redis: %v", err)
+			}
+		}
 	}
 
-	if count > 1000 {
-		global.RedisDB.ZRemRangeByRank(ctx, key, 0, count-1000)
-	}
-
-	// 更新最近消息缓存
+	// 更新最近消息缓存（Redis）
 	recentKey := models.RecentMsgPrefix + targetIdStr
 	msgInfo := map[string]any{
 		"from":      jsonMsg.FromId,
 		"content":   jsonMsg.Content,
 		"timestamp": time.Now().Unix(),
 	}
-	var msgData []byte
-	msgData, err = json.Marshal(msgInfo)
+	msgData, err := json.Marshal(msgInfo)
 	if err != nil {
-		zap.S().Error("[sendMsgAndSave] Fail to Marshal msgInfo ", err)
-		return
-	}
-	global.RedisDB.Set(ctx, recentKey, msgData, 24*time.Hour)
-
-	// 用户不在线时，计数+1
-	if !ok {
-		unreadKey := models.UnreadCountPrefix + targetIdStr
-		// 未读消息计数+1
-		global.RedisDB.Incr(ctx, unreadKey)
-		global.RedisDB.Expire(ctx, unreadKey, 30*24*time.Hour)
+		zap.S().Warnf("[sendMsgAndSave] Fail to Marshal msgInfo: %v", err)
+	} else {
+		if err := global.RedisDB.Set(ctx, recentKey, msgData, 24*time.Hour).Err(); err != nil {
+			zap.S().Warnf("[sendMsgAndSave] Failed to update recent message cache: %v", err)
+			// Redis缓存失败不影响主流程
+		}
 	}
 
-	// MySQL 持久化存储
-	if global.DB != nil {
-		if err := global.DB.Create(&jsonMsg).Error; err != nil {
-			zap.S().Error("[sendMsgAndSave] Failed to persist message into MySQL ", err)
+	// 发送消息到WebSocket队列
+	rwLocker.RLock()
+	node, ok := clientMap[userId]
+	rwLocker.RUnlock()
+
+	if ok {
+		// 如果当前用户在线，将消息转发到当前用户的websocket连接中
+		select {
+		case node.DataQueue <- msg:
+			zap.S().Debugf("[sendMsgAndSave] 消息已放入WebSocket队列 userId=%d, seq=%d", userId, jsonMsg.Seq)
+		default:
+			zap.S().Warnf("[sendMsgAndSave] 用户消息队列已满，消息可能延迟 userId=%d, seq=%d", userId, jsonMsg.Seq)
+			// 队列满时，消息已保存到MySQL和Redis，用户可以后续拉取
 		}
 	} else {
-		zap.S().Warn("[sendMsgAndSave] global.DB is nil, skip MySQL persistence")
+		// 用户不在线时，增加未读计数（Redis缓存）
+		unreadKey := models.UnreadCountPrefix + targetIdStr
+		if err := global.RedisDB.Incr(ctx, unreadKey).Err(); err != nil {
+			zap.S().Warnf("[sendMsgAndSave] Failed to increment unread count: %v", err)
+			// 未读计数失败不影响主流程，可以考虑从MySQL统计
+		} else {
+			global.RedisDB.Expire(ctx, unreadKey, 30*24*time.Hour)
+		}
+		zap.S().Debugf("[sendMsgAndSave] 用户不在线，已增加未读计数 userId=%d, seq=%d", userId, jsonMsg.Seq)
 	}
 }
 

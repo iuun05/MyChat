@@ -3,6 +3,7 @@ package initialize
 import (
 	"MyChat/dao"
 	"MyChat/global"
+	"MyChat/models"
 	"MyChat/service"
 	"context"
 	"fmt"
@@ -42,6 +43,19 @@ func InitDB() {
 		panic(err)
 	}
 
+	// 自动迁移数据库表结构，确保表结构与模型定义一致
+	err = global.DB.AutoMigrate(
+		&models.UserBasic{},
+		&models.Relation{},
+		&models.Community{},
+		&models.Message{},
+	)
+	if err != nil {
+		zap.S().Error("数据库迁移失败", zap.Error(err))
+		panic(err)
+	}
+
+	zap.S().Info("数据库迁移成功，所有表结构已更新")
 	fmt.Println("mysql init successfully")
 }
 
