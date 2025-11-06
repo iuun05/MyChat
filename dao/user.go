@@ -12,42 +12,86 @@ import (
 	"go.uber.org/zap"
 )
 
-var redisCache *cache.RedisCache
-
-func init() {
-	// 延迟初始化，等待global.RedisDB准备好
+// UserDAO 用户数据访问对象
+type UserDAO struct {
+	redisCache *cache.RedisCache
 }
 
-// InitRedisCache 初始化Redis缓存
-func InitRedisCache() {
+// NewUserDAO 创建UserDAO实例
+func NewUserDAO() *UserDAO {
+	dao := &UserDAO{}
+	dao.initRedisCache()
+	return dao
+}
+
+// initRedisCache 初始化Redis缓存
+func (u *UserDAO) initRedisCache() {
 	if global.RedisDB != nil {
-		redisCache = cache.NewRedisCache()
+		u.redisCache = cache.NewRedisCache()
 	}
 }
 
 // getRedisCache 安全地获取Redis缓存实例
-func getRedisCache() *cache.RedisCache {
-	if redisCache == nil {
-		InitRedisCache()
-		// 如果初始化后仍然是nil，说明Redis连接有问题
-		if redisCache == nil {
+func (u *UserDAO) getRedisCache() *cache.RedisCache {
+	if u.redisCache == nil {
+		u.initRedisCache()
+		if u.redisCache == nil {
 			zap.S().Warn("Redis缓存未初始化，Redis连接可能有问题")
 			return nil
 		}
 	}
+	return u.redisCache
+}
+
+// ===== 全局变量（向后兼容） =====
+var (
+	redisCache     *cache.RedisCache // 保留用于向后兼容
+	defaultUserDAO *UserDAO
+)
+
+func init() {
+	// 延迟初始化，等待global.RedisDB准备好
+	defaultUserDAO = NewUserDAO()
+	redisCache = defaultUserDAO.redisCache
+}
+
+// getRedisCacheGlobal 获取全局Redis缓存（向后兼容）
+func getRedisCacheGlobal() *cache.RedisCache {
+	if defaultUserDAO == nil {
+		defaultUserDAO = NewUserDAO()
+	}
+	redisCache = defaultUserDAO.redisCache
 	return redisCache
 }
 
-// 获取 user basics 的全部内容
-func GetUserList() (userList []*models.UserBasic, err error) {
+// InitRedisCache 初始化Redis缓存（向后兼容）
+func InitRedisCache() {
+	if defaultUserDAO == nil {
+		defaultUserDAO = NewUserDAO()
+	}
+	redisCache = defaultUserDAO.redisCache
+}
+
+// getRedisCache 安全地获取Redis缓存实例（向后兼容）
+func getRedisCache() *cache.RedisCache {
+	if defaultUserDAO == nil {
+		defaultUserDAO = NewUserDAO()
+	}
+	return defaultUserDAO.getRedisCache()
+}
+
+// ===== UserDAO 方法实现 =====
+
+// GetUserList 获取 user basics 的全部内容
+func (u *UserDAO) GetUserList() (userList []*models.UserBasic, err error) {
 	if tx := global.DB.Find(&userList); tx.RowsAffected == 0 {
 		return nil, errors.New("获取用户列表失败")
 	}
 	return userList, nil
 }
 
-// find user by name and password
-func FindUserByNameAndPwd(name string, password string) (*models.UserBasic, error) {
+// FindUserByNameAndPwd 根据用户名和密码查找用户
+func (u *UserDAO) FindUserByNameAndPwd(name string, password string) (*models.UserBasic, error) {
 	user := models.UserBasic{}
 	if tx := global.DB.Where("name = ? and pass_word = ?", name, password).First(&user); tx.RowsAffected == 0 {
 		return nil, errors.New("未查询到记录")
@@ -63,7 +107,7 @@ func FindUserByNameAndPwd(name string, password string) (*models.UserBasic, erro
 	}
 
 	// after login in the system, set user id in cache
-	if cache := getRedisCache(); cache != nil {
+	if cache := u.getRedisCache(); cache != nil {
 		if err := cache.SetUser(&user); err != nil {
 			zap.S().Warn("[FindUserByNameAndPwd] Failed to update user cache after login ", err)
 		}
@@ -77,13 +121,13 @@ func FindUserByNameAndPwd(name string, password string) (*models.UserBasic, erro
 	return &user, nil
 }
 
-// find user by name
-func FindUserByName(name string) (*models.UserBasic, error) {
+// FindUserByName 根据用户名查找用户
+func (u *UserDAO) FindUserByName(name string) (*models.UserBasic, error) {
 	var user *models.UserBasic
 	var err error
 
 	// query from redis
-	if cache := getRedisCache(); cache != nil {
+	if cache := u.getRedisCache(); cache != nil {
 		user, err = cache.GetUserByName(name)
 		if err != nil {
 			zap.S().Warn("[FindUserByName] Failed to retrieve user from cache ", err)
@@ -102,7 +146,7 @@ func FindUserByName(name string) (*models.UserBasic, error) {
 	}
 
 	// update redis
-	if cache := getRedisCache(); cache != nil {
+	if cache := u.getRedisCache(); cache != nil {
 		if err := cache.SetUser(user); err != nil {
 			zap.S().Warn("Fail to update user redis ", err)
 		}
@@ -111,8 +155,8 @@ func FindUserByName(name string) (*models.UserBasic, error) {
 	return user, nil
 }
 
-// find user, for register
-func FindUser(name string) (*models.UserBasic, error) {
+// FindUser 查找用户（用于注册时检查用户名是否存在）
+func (u *UserDAO) FindUser(name string) (*models.UserBasic, error) {
 	user := models.UserBasic{}
 	if tx := global.DB.Where("name = ?", name).First(&user); tx.RowsAffected == 1 {
 		return nil, errors.New("用户名已经存在，请换一个用户名")
@@ -120,13 +164,13 @@ func FindUser(name string) (*models.UserBasic, error) {
 	return &user, nil
 }
 
-// Find user by user id
-func FindUserByUserID(ID uint) (*models.UserBasic, error) {
+// FindUserByUserID 根据用户ID查找用户
+func (u *UserDAO) FindUserByUserID(ID uint) (*models.UserBasic, error) {
 	var user *models.UserBasic
 	var err error
 
 	// query from redis
-	if cache := getRedisCache(); cache != nil {
+	if cache := u.getRedisCache(); cache != nil {
 		user, err = cache.GetUser(ID)
 		// cache miss
 		if err != nil {
@@ -142,12 +186,12 @@ func FindUserByUserID(ID uint) (*models.UserBasic, error) {
 
 	// query from database
 	user = &models.UserBasic{}
-	if tx := global.DB.Where(ID).First(user); tx.RowsAffected == 0 {
+	if tx := global.DB.Where("id = ?", ID).First(user); tx.RowsAffected == 0 {
 		return nil, errors.New("未查询到记录")
 	}
 
 	// Write result to cache
-	if cache := getRedisCache(); cache != nil {
+	if cache := u.getRedisCache(); cache != nil {
 		if err := cache.SetUser(user); err != nil {
 			zap.S().Warn("fail to write result to cache ", err)
 		}
@@ -156,7 +200,8 @@ func FindUserByUserID(ID uint) (*models.UserBasic, error) {
 	return user, nil
 }
 
-func FindUserByPhone(phone string) (*models.UserBasic, error) {
+// FindUserByPhone 根据手机号查找用户
+func (u *UserDAO) FindUserByPhone(phone string) (*models.UserBasic, error) {
 	user := models.UserBasic{}
 	if tx := global.DB.Where("phone = ?", phone).First(&user); tx.RowsAffected == 0 {
 		return nil, errors.New("未查询到记录")
@@ -164,7 +209,8 @@ func FindUserByPhone(phone string) (*models.UserBasic, error) {
 	return &user, nil
 }
 
-func FindUerByEmail(email string) (*models.UserBasic, error) {
+// FindUserByEmail 根据邮箱查找用户
+func (u *UserDAO) FindUserByEmail(email string) (*models.UserBasic, error) {
 	user := models.UserBasic{}
 	if tx := global.DB.Where("email = ?", email).First(&user); tx.RowsAffected == 0 {
 		return nil, errors.New("未查询到记录")
@@ -173,7 +219,7 @@ func FindUerByEmail(email string) (*models.UserBasic, error) {
 }
 
 // CreateUser 新建用户
-func CreateUser(user models.UserBasic) (*models.UserBasic, error) {
+func (u *UserDAO) CreateUser(user models.UserBasic) (*models.UserBasic, error) {
 	tx := global.DB.Create(&user)
 	if tx.RowsAffected == 0 {
 		zap.S().Info("新建用户失败")
@@ -181,7 +227,7 @@ func CreateUser(user models.UserBasic) (*models.UserBasic, error) {
 	}
 
 	// write new user to redis
-	if cache := getRedisCache(); cache != nil {
+	if cache := u.getRedisCache(); cache != nil {
 		if err := cache.SetUser(&user); err != nil {
 			zap.S().Warn("[CreateUser] Failed to write new user to cache ", err)
 		}
@@ -190,7 +236,8 @@ func CreateUser(user models.UserBasic) (*models.UserBasic, error) {
 	return &user, nil
 }
 
-func UpdateUser(user models.UserBasic) (*models.UserBasic, error) {
+// UpdateUser 更新用户信息
+func (u *UserDAO) UpdateUser(user models.UserBasic) (*models.UserBasic, error) {
 	tx := global.DB.Model(&user).Updates(models.UserBasic{
 		Name:     user.Name,
 		PassWord: user.PassWord,
@@ -206,7 +253,7 @@ func UpdateUser(user models.UserBasic) (*models.UserBasic, error) {
 	}
 
 	// update redis
-	if cache := getRedisCache(); cache != nil {
+	if cache := u.getRedisCache(); cache != nil {
 		if err := cache.SetUser(&user); err != nil {
 			zap.S().Warn("[UpdateUser] Fail to update cache ", err)
 		}
@@ -220,14 +267,15 @@ func UpdateUser(user models.UserBasic) (*models.UserBasic, error) {
 	return &user, nil
 }
 
-func DeleteUser(user models.UserBasic) error {
+// DeleteUser 删除用户
+func (u *UserDAO) DeleteUser(user models.UserBasic) error {
 	if tx := global.DB.Delete(&user); tx.RowsAffected == 0 {
 		zap.S().Info("删除失败")
 		return errors.New("删除用户失败")
 	}
 
 	// delete user from cache
-	if cache := getRedisCache(); cache != nil {
+	if cache := u.getRedisCache(); cache != nil {
 		if err := cache.DeleteUser(user.ID); err != nil {
 			zap.S().Warn("[DeleteUser] Fail to delete user from cache ", err)
 		}
@@ -239,4 +287,56 @@ func DeleteUser(user models.UserBasic) error {
 	}
 
 	return nil
+}
+
+// ===== 向后兼容的全局函数（委托给defaultUserDAO） =====
+
+// GetUserList 获取用户列表（向后兼容）
+func GetUserList() (userList []*models.UserBasic, err error) {
+	return defaultUserDAO.GetUserList()
+}
+
+// FindUserByNameAndPwd 根据用户名和密码查找用户（向后兼容）
+func FindUserByNameAndPwd(name string, password string) (*models.UserBasic, error) {
+	return defaultUserDAO.FindUserByNameAndPwd(name, password)
+}
+
+// FindUserByName 根据用户名查找用户（向后兼容）
+func FindUserByName(name string) (*models.UserBasic, error) {
+	return defaultUserDAO.FindUserByName(name)
+}
+
+// FindUser 查找用户（向后兼容）
+func FindUser(name string) (*models.UserBasic, error) {
+	return defaultUserDAO.FindUser(name)
+}
+
+// FindUserByUserID 根据用户ID查找用户（向后兼容）
+func FindUserByUserID(ID uint) (*models.UserBasic, error) {
+	return defaultUserDAO.FindUserByUserID(ID)
+}
+
+// FindUserByPhone 根据手机号查找用户（向后兼容）
+func FindUserByPhone(phone string) (*models.UserBasic, error) {
+	return defaultUserDAO.FindUserByPhone(phone)
+}
+
+// FindUerByEmail 根据邮箱查找用户（向后兼容，注意原函数名拼写错误）
+func FindUerByEmail(email string) (*models.UserBasic, error) {
+	return defaultUserDAO.FindUserByEmail(email)
+}
+
+// CreateUser 新建用户（向后兼容）
+func CreateUser(user models.UserBasic) (*models.UserBasic, error) {
+	return defaultUserDAO.CreateUser(user)
+}
+
+// UpdateUser 更新用户信息（向后兼容）
+func UpdateUser(user models.UserBasic) (*models.UserBasic, error) {
+	return defaultUserDAO.UpdateUser(user)
+}
+
+// DeleteUser 删除用户（向后兼容）
+func DeleteUser(user models.UserBasic) error {
+	return defaultUserDAO.DeleteUser(user)
 }

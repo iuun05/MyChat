@@ -20,12 +20,38 @@ import (
 	"go.uber.org/zap"
 )
 
-// 映射关系
+// MessageDAO 消息数据访问对象
+type MessageDAO struct {
+	clientMap     map[int64]*models.Node // 用户连接映射
+	upSendChan    chan []byte            // UDP发送通道
+	rwLocker      sync.RWMutex           // 读写锁
+	udpSender     *UDPSender             // UDP发送器
+	udpReceiver   *UDPReceiver           // UDP接收器
+	udpStateMutex sync.RWMutex           // UDP状态锁
+}
+
+// NewMessageDAO 创建MessageDAO实例
+func NewMessageDAO() *MessageDAO {
+	return &MessageDAO{
+		clientMap:     make(map[int64]*models.Node, 0),
+		upSendChan:    make(chan []byte, 1024),
+		rwLocker:      sync.RWMutex{},
+		udpStateMutex: sync.RWMutex{},
+	}
+}
+
+// ===== 全局变量（向后兼容） =====
 var clientMap map[int64]*models.Node = make(map[int64]*models.Node, 0)
 var upSendChan chan []byte = make(chan []byte, 1024)
-
-// rw locker
 var rwLocker sync.RWMutex
+var defaultMessageDAO *MessageDAO
+
+func init() {
+	defaultMessageDAO = NewMessageDAO()
+	clientMap = defaultMessageDAO.clientMap
+	upSendChan = defaultMessageDAO.upSendChan
+	rwLocker = defaultMessageDAO.rwLocker
+}
 
 // UDP可靠传输相关结构
 type UDPPacket struct {
@@ -90,19 +116,30 @@ var (
 )
 
 // generateSeq 为Node生成唯一消息序号（每个Node独立）
-func generateSeq(node *models.Node) int64 {
+func (m *MessageDAO) generateSeq(node *models.Node) int64 {
 	node.SeqMutex.Lock()
 	defer node.SeqMutex.Unlock()
 	node.SeqGenerator++
 	return node.SeqGenerator
 }
 
-func broMsg(data []byte) {
+// generateSeq 为Node生成唯一消息序号（向后兼容）
+func generateSeq(node *models.Node) int64 {
+	return defaultMessageDAO.generateSeq(node)
+}
+
+// broMsg 通过UDP通道发送消息
+func (m *MessageDAO) broMsg(data []byte) {
 	select {
-	case upSendChan <- data:
+	case m.upSendChan <- data:
 	default:
 		zap.S().Warn("UDP发送通道已满，消息丢弃")
 	}
+}
+
+// broMsg 通过UDP通道发送消息（向后兼容）
+func broMsg(data []byte) {
+	defaultMessageDAO.broMsg(data)
 }
 
 // encodeUDPPacket 编码UDP包为字节流
@@ -420,15 +457,23 @@ func sendProc(node *models.Node, userId int64) {
 				continue
 			} else if msg.Type == models.AckMessageType {
 				if msg.TargetId == userId || msg.TargetId == 0 {
-					// 这是发给当前用户的ACK，从待确认列表中移除
+					// 这是发给当前用户的ACK（接收方发来的确认），从待确认列表中移除
 					node.SeqMutex.Lock()
 					if _, exists := node.PendingMsgs[msg.Seq]; exists {
 						delete(node.PendingMsgs, msg.Seq)
-						zap.S().Debugf("收到ACK确认，移除待确认消息 seq=%d", msg.Seq)
+						zap.S().Debugf("收到ACK确认，移除待确认消息 seq=%d, userId=%d", msg.Seq, userId)
 					} else {
-						zap.S().Debugf("收到ACK确认，但对应的消息不在待确认列表中 seq=%d", msg.Seq)
+						zap.S().Debugf("收到ACK确认，但对应的消息不在待确认列表中 seq=%d, userId=%d", msg.Seq, userId)
 					}
 					node.SeqMutex.Unlock()
+
+					// ✨ 关键修复：ACK必须通过WebSocket发送给客户端，让客户端知道消息已确认
+					if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
+						zap.S().Error("发送ACK给客户端失败", zap.Error(err))
+					} else {
+						zap.S().Debugf("ACK已发送给客户端 seq=%d, userId=%d", msg.Seq, userId)
+					}
+					continue // ACK处理完毕，不继续后续流程
 				} else {
 					// ACK需要路由到其他发送方Node（TargetId是原始发送方）
 					rwLocker.RLock()
@@ -436,16 +481,17 @@ func sendProc(node *models.Node, userId int64) {
 					rwLocker.RUnlock()
 
 					if exists {
-						// 发送给发送方的DataQueue，由发送方的sendProc处理
+						// 路由ACK到发送方的DataQueue，由发送方的sendProc处理
 						select {
 						case targetNode.DataQueue <- data:
-							zap.S().Debugf("ACK消息已路由到发送方 userId=%d", msg.TargetId)
+							zap.S().Debugf("ACK消息已路由到发送方 seq=%d, from userId=%d to userId=%d", msg.Seq, userId, msg.TargetId)
 						default:
 							zap.S().Warnf("ACK消息队列已满，无法路由到 userId=%d", msg.TargetId)
 						}
 					} else {
 						zap.S().Warnf("ACK目标用户不在线 userId=%d", msg.TargetId)
 					}
+					continue // ACK路由完毕，不继续后续流程
 				}
 			}
 
@@ -1132,6 +1178,12 @@ func sendMsgAndSave(userId int64, msg []byte) {
 	jsonMsg := models.Message{}
 	if err := json.Unmarshal(msg, &jsonMsg); err != nil {
 		zap.S().Error("[sendMsgAndSave] 消息解析失败", zap.Error(err))
+		return
+	}
+
+	// 过滤不需要保存的消息类型（心跳、ACK等）
+	if jsonMsg.Type == models.HeartBeatMessageType || jsonMsg.Type == models.AckMessageType {
+		zap.S().Debugf("[sendMsgAndSave] 跳过保存系统消息 type=%d, seq=%d", jsonMsg.Type, jsonMsg.Seq)
 		return
 	}
 

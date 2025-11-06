@@ -6,9 +6,19 @@ import (
 	"errors"
 )
 
-// CreateCommunity 新建群
-func CreateCommunity(community models.Community) (int, error) {
+// CommunityDAO 群组数据访问对象
+type CommunityDAO struct {
+}
 
+// NewCommunityDAO 创建CommunityDAO实例
+func NewCommunityDAO() *CommunityDAO {
+	return &CommunityDAO{}
+}
+
+// ===== CommunityDAO 方法实现 =====
+
+// CreateCommunity 新建群
+func (c *CommunityDAO) CreateCommunity(community models.Community) (int, error) {
 	com := models.Community{}
 	//查询群是否已经存在
 	if tx := global.DB.Where("name = ?", community.Name).First(&com); tx.RowsAffected == 1 {
@@ -35,8 +45,7 @@ func CreateCommunity(community models.Community) (int, error) {
 }
 
 // GetCommunityList 获取群列表
-func GetCommunityList(ownerId uint) (*[]models.Community, error) {
-
+func (c *CommunityDAO) GetCommunityList(ownerId uint) (*[]models.Community, error) {
 	//获取我加入的群
 	relation := make([]models.Relation, 0)
 
@@ -59,7 +68,7 @@ func GetCommunityList(ownerId uint) (*[]models.Community, error) {
 }
 
 // JoinCommunity 根据群昵称搜索并加入群
-func JoinCommunity(ownerId uint, cname string) (int, error) {
+func (c *CommunityDAO) JoinCommunity(ownerId uint, cname string) (int, error) {
 	community := models.Community{}
 	if tx := global.DB.Where("name = ?", cname).First(&community); tx.RowsAffected == 0 {
 		return -1, errors.New("群记录不存在")
@@ -84,7 +93,7 @@ func JoinCommunity(ownerId uint, cname string) (int, error) {
 }
 
 // FindUsers 获取群成员id
-func FindUsers(groupId uint) (*[]uint, error) {
+func (c *CommunityDAO) FindUsers(groupId uint) (*[]uint, error) {
 	relation := make([]models.Relation, 0)
 	if tx := global.DB.Where("target_id = ? and type = 2", groupId).Find(&relation); tx.RowsAffected == 0 {
 		return nil, errors.New("未查询到成员信息")
@@ -96,4 +105,31 @@ func FindUsers(groupId uint) (*[]uint, error) {
 		userIDs = append(userIDs, userId)
 	}
 	return &userIDs, nil
+}
+
+// ===== 向后兼容的全局函数（委托给defaultCommunityDAO） =====
+var defaultCommunityDAO *CommunityDAO
+
+func init() {
+	defaultCommunityDAO = NewCommunityDAO()
+}
+
+// CreateCommunity 新建群（向后兼容）
+func CreateCommunity(community models.Community) (int, error) {
+	return defaultCommunityDAO.CreateCommunity(community)
+}
+
+// GetCommunityList 获取群列表（向后兼容）
+func GetCommunityList(ownerId uint) (*[]models.Community, error) {
+	return defaultCommunityDAO.GetCommunityList(ownerId)
+}
+
+// JoinCommunity 根据群昵称搜索并加入群（向后兼容）
+func JoinCommunity(ownerId uint, cname string) (int, error) {
+	return defaultCommunityDAO.JoinCommunity(ownerId, cname)
+}
+
+// FindUsers 获取群成员id（向后兼容）
+func FindUsers(groupId uint) (*[]uint, error) {
+	return defaultCommunityDAO.FindUsers(groupId)
 }
