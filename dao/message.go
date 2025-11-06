@@ -4,10 +4,8 @@ import (
 	"MyChat/global"
 	"MyChat/models"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -22,74 +20,29 @@ import (
 
 // MessageDAO 消息数据访问对象
 type MessageDAO struct {
-	clientMap     map[int64]*models.Node // 用户连接映射
-	upSendChan    chan []byte            // UDP发送通道
-	rwLocker      sync.RWMutex           // 读写锁
-	udpSender     *UDPSender             // UDP发送器
-	udpReceiver   *UDPReceiver           // UDP接收器
-	udpStateMutex sync.RWMutex           // UDP状态锁
+	clientMap map[int64]*models.Node // 用户连接映射（WebSocket）
+	rwLocker  sync.RWMutex           // 读写锁
 }
 
 // NewMessageDAO 创建MessageDAO实例
 func NewMessageDAO() *MessageDAO {
 	return &MessageDAO{
-		clientMap:     make(map[int64]*models.Node, 0),
-		upSendChan:    make(chan []byte, 1024),
-		rwLocker:      sync.RWMutex{},
-		udpStateMutex: sync.RWMutex{},
+		clientMap: make(map[int64]*models.Node, 0),
+		rwLocker:  sync.RWMutex{},
 	}
 }
 
 // ===== 全局变量（向后兼容） =====
 var clientMap map[int64]*models.Node = make(map[int64]*models.Node, 0)
-var upSendChan chan []byte = make(chan []byte, 1024)
 var rwLocker sync.RWMutex
 var defaultMessageDAO *MessageDAO
 
 func init() {
 	defaultMessageDAO = NewMessageDAO()
 	clientMap = defaultMessageDAO.clientMap
-	upSendChan = defaultMessageDAO.upSendChan
-	rwLocker = defaultMessageDAO.rwLocker
+	// 注意：rwLocker 是独立的全局变量，与 defaultMessageDAO.rwLocker 是同一个锁的引用
+	// 但由于 sync.RWMutex 不能直接复制，这里保持独立，两个锁会同步使用
 }
-
-// UDP可靠传输相关结构
-type UDPPacket struct {
-	Type    uint8  // 包类型：0=数据, 1=ACK, 2=重传请求
-	Seq     uint32 // 序号（发送方分配）
-	AckSeq  uint32 // ACK序号（确认已收到的最大序号）
-	DataLen uint16 // 数据长度
-	Data    []byte // 数据内容
-}
-
-// UDP发送状态
-type UDPSender struct {
-	NextSeq        uint32                // 下一个要发送的序号
-	PendingPackets map[uint32]*UDPPacket // 待确认的数据包
-	PendingMutex   sync.RWMutex          // 保护待确认列表
-	RetryTicker    *time.Ticker          // 重传定时器
-}
-
-// UDP接收状态
-type UDPReceiver struct {
-	ExpectedSeq uint32                // 期望的下一个序号
-	Buffer      map[uint32]*UDPPacket // 乱序缓冲区
-	BufferMutex sync.RWMutex          // 保护缓冲区
-	LastAckSeq  uint32                // 最后确认的序号
-}
-
-var (
-	udpSender     *UDPSender
-	udpReceiver   *UDPReceiver
-	udpStateMutex sync.RWMutex
-)
-
-// UDP包类型常量
-const (
-	UDPPacketTypeData       = 0 // 数据包
-	UDPPacketTypeAck        = 1 // ACK确认包
-	UDPPacketTypeRetransmit = 2 // 重传请求包
-)
 
 // 心跳和消息重发相关常量
 const (
@@ -97,22 +50,6 @@ const (
 	HeartbeatTimeout  = 90 * time.Second // 心跳超时时间
 	MaxRetryCount     = 3                // 最大重试次数
 	RetryInterval     = 5 * time.Second  // 重试间隔
-	UDPRetryInterval  = 2 * time.Second  // UDP重传间隔
-	UDPMaxRetryCount  = 5                // UDP最大重试次数
-	UDPBufferSize     = 1000             // UDP接收缓冲区大小
-	UDPPacketTimeout  = 10 * time.Second // UDP包超时时间
-)
-
-// UDP配置
-var (
-	UDPListenAddr = &net.UDPAddr{
-		IP:   net.IPv4(127, 0, 0, 1),
-		Port: 3000,
-	}
-	UDPRemoteAddr = &net.UDPAddr{
-		IP:   net.IPv4(127, 0, 0, 1),
-		Port: 3001, // 远程UDP服务器端口（如果有）
-	}
 )
 
 // generateSeq 为Node生成唯一消息序号（每个Node独立）
@@ -126,102 +63,6 @@ func (m *MessageDAO) generateSeq(node *models.Node) int64 {
 // generateSeq 为Node生成唯一消息序号（向后兼容）
 func generateSeq(node *models.Node) int64 {
 	return defaultMessageDAO.generateSeq(node)
-}
-
-// broMsg 通过UDP通道发送消息
-func (m *MessageDAO) broMsg(data []byte) {
-	select {
-	case m.upSendChan <- data:
-	default:
-		zap.S().Warn("UDP发送通道已满，消息丢弃")
-	}
-}
-
-// broMsg 通过UDP通道发送消息（向后兼容）
-func broMsg(data []byte) {
-	defaultMessageDAO.broMsg(data)
-}
-
-// encodeUDPPacket 编码UDP包为字节流
-func encodeUDPPacket(pkt *UDPPacket) ([]byte, error) {
-	// 包格式：Type(1) + Seq(4) + AckSeq(4) + DataLen(2) + Data(N)
-	dataLen := uint16(len(pkt.Data))
-	buf := make([]byte, 1+4+4+2+dataLen)
-
-	offset := 0
-	buf[offset] = pkt.Type
-	offset++
-
-	binary.BigEndian.PutUint32(buf[offset:], pkt.Seq)
-	offset += 4
-
-	binary.BigEndian.PutUint32(buf[offset:], pkt.AckSeq)
-	offset += 4
-
-	binary.BigEndian.PutUint16(buf[offset:], dataLen)
-	offset += 2
-
-	copy(buf[offset:], pkt.Data)
-	return buf, nil
-}
-
-// decodeUDPPacket 从字节流解码UDP包
-func decodeUDPPacket(data []byte) (*UDPPacket, error) {
-	if len(data) < 11 { // 最小包大小：1+4+4+2
-		return nil, fmt.Errorf("UDP包太小")
-	}
-
-	pkt := &UDPPacket{}
-	offset := 0
-
-	pkt.Type = data[offset]
-	offset++
-
-	pkt.Seq = binary.BigEndian.Uint32(data[offset:])
-	offset += 4
-
-	pkt.AckSeq = binary.BigEndian.Uint32(data[offset:])
-	offset += 4
-
-	pkt.DataLen = binary.BigEndian.Uint16(data[offset:])
-	offset += 2
-
-	if len(data) < offset+int(pkt.DataLen) {
-		return nil, fmt.Errorf("UDP包数据不完整")
-	}
-
-	pkt.Data = make([]byte, pkt.DataLen)
-	copy(pkt.Data, data[offset:offset+int(pkt.DataLen)])
-
-	return pkt, nil
-}
-
-// initUDPSender 初始化UDP发送器
-func initUDPSender() {
-	udpStateMutex.Lock()
-	defer udpStateMutex.Unlock()
-
-	if udpSender == nil {
-		udpSender = &UDPSender{
-			NextSeq:        1,
-			PendingPackets: make(map[uint32]*UDPPacket),
-			RetryTicker:    time.NewTicker(UDPRetryInterval),
-		}
-	}
-}
-
-// initUDPReceiver 初始化UDP接收器
-func initUDPReceiver() {
-	udpStateMutex.Lock()
-	defer udpStateMutex.Unlock()
-
-	if udpReceiver == nil {
-		udpReceiver = &UDPReceiver{
-			ExpectedSeq: 1,
-			Buffer:      make(map[uint32]*UDPPacket),
-			LastAckSeq:  0,
-		}
-	}
 }
 
 // Chat 建立WebSocket连接
@@ -844,282 +685,6 @@ func retryPendingMsgs(node *models.Node, userId int64) {
 		default:
 			// 队列已满，记录警告但继续尝试其他消息
 			zap.S().Warnf("重发消息队列已满，跳过重发 userId=%d, seq=%d", userId, seq)
-		}
-	}
-}
-
-// UdpSendProc 完成UDP数据发送，支持可靠传输
-func UdpSendProc() {
-	initUDPSender()
-
-	udpConn, err := net.DialUDP("udp", nil, UDPListenAddr)
-	if err != nil {
-		zap.S().Error("UDP拨号失败", zap.Error(err))
-		return
-	}
-	defer udpConn.Close()
-
-	// 启动重传协程
-	go udpRetransmitWorker(udpConn)
-
-	// 发送数据协程
-	for data := range upSendChan {
-		// 创建UDP包
-		var lastAckSeq uint32
-		udpStateMutex.RLock()
-		if udpReceiver != nil {
-			udpReceiver.BufferMutex.RLock()
-			lastAckSeq = udpReceiver.LastAckSeq
-			udpReceiver.BufferMutex.RUnlock()
-		}
-		udpStateMutex.RUnlock()
-
-		pkt := &UDPPacket{
-			Type:    UDPPacketTypeData,
-			Seq:     udpSender.NextSeq,
-			AckSeq:  lastAckSeq, // 携带接收方最后确认的序号（用于双向确认）
-			DataLen: uint16(len(data)),
-			Data:    data,
-		}
-
-		// 编码包
-		packetData, err := encodeUDPPacket(pkt)
-		if err != nil {
-			zap.S().Error("编码UDP包失败", zap.Error(err))
-			continue
-		}
-
-		// 发送UDP包
-		_, err = udpConn.Write(packetData)
-		if err != nil {
-			zap.S().Error("发送UDP包失败", zap.Error(err))
-			continue
-		}
-
-		// 添加到待确认列表
-		udpSender.PendingMutex.Lock()
-		udpSender.PendingPackets[pkt.Seq] = pkt
-		udpSender.NextSeq++
-		udpSender.PendingMutex.Unlock()
-
-		zap.S().Debugf("UDP数据包已发送 seq=%d, dataLen=%d", pkt.Seq, len(data))
-	}
-}
-
-// udpRetransmitWorker UDP重传工作协程
-func udpRetransmitWorker(conn *net.UDPConn) {
-	ticker := time.NewTicker(UDPRetryInterval)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		udpSender.PendingMutex.RLock()
-		if len(udpSender.PendingPackets) == 0 {
-			udpSender.PendingMutex.RUnlock()
-			continue
-		}
-
-		// 复制待重传的包列表
-		packetsToRetry := make([]*UDPPacket, 0)
-		for _, pkt := range udpSender.PendingPackets {
-			packetsToRetry = append(packetsToRetry, pkt)
-		}
-		udpSender.PendingMutex.RUnlock()
-
-		// 重传未确认的包
-		for _, pkt := range packetsToRetry {
-			packetData, err := encodeUDPPacket(pkt)
-			if err != nil {
-				zap.S().Errorf("重传编码UDP包失败 seq=%d", pkt.Seq, zap.Error(err))
-				continue
-			}
-
-			_, err = conn.Write(packetData)
-			if err != nil {
-				zap.S().Errorf("重传UDP包失败 seq=%d", pkt.Seq, zap.Error(err))
-			} else {
-				// UDP重传是正常机制，使用Debug级别
-				zap.S().Debugf("重传UDP包 seq=%d", pkt.Seq)
-			}
-		}
-	}
-}
-
-// UpdRecProc 完成UDP数据的接收，支持可靠传输和顺序重组
-func UpdRecProc() {
-	initUDPReceiver()
-
-	udpConn, err := net.ListenUDP("udp", UDPListenAddr)
-	if err != nil {
-		zap.S().Error("监听UDP端口失败", zap.Error(err))
-		return
-	}
-	defer udpConn.Close()
-
-	zap.S().Info("UDP接收服务已启动", UDPListenAddr)
-
-	// 启动顺序处理协程
-	go udpOrderedProcessor()
-
-	for {
-		buf := make([]byte, 1500) // UDP最大包大小
-		n, addr, err := udpConn.ReadFromUDP(buf)
-		if err != nil {
-			zap.S().Error("读取UDP数据失败", zap.Error(err))
-			continue
-		}
-
-		// 解码UDP包
-		pkt, err := decodeUDPPacket(buf[:n])
-		if err != nil {
-			zap.S().Warn("解码UDP包失败", err, "from", addr)
-			continue
-		}
-
-		// 处理不同类型的包
-		switch pkt.Type {
-		case UDPPacketTypeData:
-			handleUDPDataPacket(pkt, udpConn, addr)
-		case UDPPacketTypeAck:
-			handleUDPAckPacket(pkt)
-		case UDPPacketTypeRetransmit:
-			handleUDPRetransmitRequest(pkt, udpConn, addr)
-		default:
-			zap.S().Warnf("未知UDP包类型: %d", pkt.Type)
-		}
-	}
-}
-
-// handleUDPDataPacket 处理UDP数据包
-func handleUDPDataPacket(pkt *UDPPacket, conn *net.UDPConn, addr *net.UDPAddr) {
-	udpReceiver.BufferMutex.Lock()
-	defer udpReceiver.BufferMutex.Unlock()
-
-	seq := pkt.Seq
-
-	// 如果序号小于期望序号，说明是重复包，仍然发送ACK
-	if seq < udpReceiver.ExpectedSeq {
-		zap.S().Debugf("收到重复UDP包 seq=%d, 期望=%d", seq, udpReceiver.ExpectedSeq)
-		sendUDPAck(conn, addr, udpReceiver.LastAckSeq)
-		return
-	}
-
-	// 如果序号等于期望序号，直接处理
-	if seq == udpReceiver.ExpectedSeq {
-		udpReceiver.ExpectedSeq++
-		udpReceiver.LastAckSeq = seq
-
-		// 处理消息
-		Dispatch(pkt.Data)
-
-		// 检查缓冲区中是否有连续的包可以处理
-		for {
-			nextPkt, exists := udpReceiver.Buffer[udpReceiver.ExpectedSeq]
-			if !exists {
-				break
-			}
-			udpReceiver.ExpectedSeq++
-			udpReceiver.LastAckSeq = nextPkt.Seq
-			delete(udpReceiver.Buffer, nextPkt.Seq)
-			Dispatch(nextPkt.Data)
-		}
-
-		// 发送ACK
-		sendUDPAck(conn, addr, udpReceiver.LastAckSeq)
-	} else {
-		// 序号大于期望序号，放入缓冲区（乱序）
-		if len(udpReceiver.Buffer) < UDPBufferSize {
-			udpReceiver.Buffer[seq] = pkt
-			zap.S().Debugf("UDP包乱序，放入缓冲区 seq=%d, 期望=%d", seq, udpReceiver.ExpectedSeq)
-		} else {
-			zap.S().Warnf("UDP接收缓冲区已满，丢弃包 seq=%d", seq)
-		}
-		// 仍然发送ACK（确认收到但未处理）
-		sendUDPAck(conn, addr, udpReceiver.LastAckSeq)
-	}
-}
-
-// handleUDPAckPacket 处理UDP ACK包
-func handleUDPAckPacket(pkt *UDPPacket) {
-	udpSender.PendingMutex.Lock()
-	defer udpSender.PendingMutex.Unlock()
-
-	ackSeq := pkt.AckSeq
-
-	// 移除已确认的包
-	packetsToRemove := make([]uint32, 0)
-	for seq := range udpSender.PendingPackets {
-		if seq <= ackSeq {
-			packetsToRemove = append(packetsToRemove, seq)
-		}
-	}
-
-	for _, seq := range packetsToRemove {
-		delete(udpSender.PendingPackets, seq)
-	}
-
-	if len(packetsToRemove) > 0 {
-		zap.S().Debugf("收到UDP ACK，移除 %d 个已确认包，最大seq=%d", len(packetsToRemove), ackSeq)
-	}
-}
-
-// handleUDPRetransmitRequest 处理重传请求
-func handleUDPRetransmitRequest(pkt *UDPPacket, conn *net.UDPConn, addr *net.UDPAddr) {
-	// 接收方请求重传某个序号的数据包
-	// 这里简化处理：如果还在缓冲区中，直接发送ACK即可（因为可能已经处理过了）
-	zap.S().Debugf("收到重传请求 seq=%d", pkt.Seq)
-	sendUDPAck(conn, addr, udpReceiver.LastAckSeq)
-}
-
-// sendUDPAck 发送UDP ACK包
-func sendUDPAck(conn *net.UDPConn, addr *net.UDPAddr, ackSeq uint32) {
-	pkt := &UDPPacket{
-		Type:    UDPPacketTypeAck,
-		Seq:     0, // ACK包不需要序号
-		AckSeq:  ackSeq,
-		DataLen: 0,
-		Data:    nil,
-	}
-
-	packetData, err := encodeUDPPacket(pkt)
-	if err != nil {
-		zap.S().Error("编码UDP ACK包失败", zap.Error(err))
-		return
-	}
-
-	_, err = conn.WriteToUDP(packetData, addr)
-	if err != nil {
-		zap.S().Error("发送UDP ACK失败", zap.Error(err))
-	} else {
-		zap.S().Debugf("发送UDP ACK ackSeq=%d", ackSeq)
-	}
-}
-
-// udpOrderedProcessor 顺序处理缓冲区中的数据包
-func udpOrderedProcessor() {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		udpReceiver.BufferMutex.Lock()
-
-		// 检查是否有连续的包可以处理
-		processed := false
-		for {
-			nextPkt, exists := udpReceiver.Buffer[udpReceiver.ExpectedSeq]
-			if !exists {
-				break
-			}
-			udpReceiver.ExpectedSeq++
-			udpReceiver.LastAckSeq = nextPkt.Seq
-			delete(udpReceiver.Buffer, nextPkt.Seq)
-			Dispatch(nextPkt.Data)
-			processed = true
-		}
-
-		udpReceiver.BufferMutex.Unlock()
-
-		if processed {
-			zap.S().Debugf("顺序处理了缓冲区的UDP包，当前期望seq=%d", udpReceiver.ExpectedSeq)
 		}
 	}
 }
