@@ -34,7 +34,7 @@ func main() {
 	// 启动HTTP服务器（Gin）
 	go func() {
 		defer wg.Done()
-		router := router.Router()
+	router := router.Router()
 		port := global.ServiceConfig.Port
 		if port == 0 {
 			port = 8080
