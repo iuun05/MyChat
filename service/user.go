@@ -16,19 +16,32 @@ import (
 	"go.uber.org/zap"
 )
 
-var redisCache *cache.RedisCache
+var (
+	redisCache *cache.RedisCache
+	userDAO    *dao.UserDAO
+	messageDAO *dao.MessageDAO
+)
 
-// InitRedisCache 初始化Redis缓存
-func InitRedisCache() {
-	if global.RedisDB != nil {
+func Init() {
+	if global.RedisDB != nil && redisCache == nil {
 		redisCache = cache.NewRedisCache()
+	} else {
+		zap.S().Error("global redis db is nil")
+	}
+
+	if userDAO == nil {
+		userDAO = dao.NewUserDAO()
+	}
+
+	if messageDAO == nil {
+		messageDAO = dao.NewMessageDAO()
 	}
 }
 
 // getRedisCache 安全地获取Redis缓存实例
 func getRedisCache() *cache.RedisCache {
 	if redisCache == nil {
-		InitRedisCache()
+		Init()
 		if redisCache == nil {
 			zap.S().Warn("Redis缓存未初始化，Redis连接可能有问题")
 			return nil
@@ -37,9 +50,22 @@ func getRedisCache() *cache.RedisCache {
 	return redisCache
 }
 
+func getUserDAO() *dao.UserDAO {
+	if userDAO == nil {
+		Init()
+	}
+	return userDAO
+}
+
+func InitUserDAO() {
+	if userDAO == nil {
+		Init()
+	}
+}
+
 // List 获取用户列表
 func List(ctx *gin.Context) {
-	list, err := dao.GetUserList()
+	list, err := getUserDAO().GetUserList()
 	if err != nil {
 		common.Error(ctx, -1, "获取用户列表失败")
 		return
@@ -55,7 +81,7 @@ func LoginByNameAndPassWord(ctx *gin.Context) {
 		return
 	}
 
-	data, err := dao.FindUserByName(req.Name)
+	data, err := getUserDAO().FindUserByName(req.Name)
 	if err != nil {
 		common.Error(ctx, -1, "登录失败")
 		return
@@ -72,7 +98,7 @@ func LoginByNameAndPassWord(ctx *gin.Context) {
 		return
 	}
 
-	Rsp, err := dao.FindUserByNameAndPwd(req.Name, data.PassWord)
+	Rsp, err := getUserDAO().FindUserByNameAndPwd(req.Name, data.PassWord)
 	if err != nil {
 		zap.S().Info("登录失败", err)
 		common.Error(ctx, -1, "登录失败")
@@ -139,7 +165,7 @@ func GetUnreadMessageCount(ctx *gin.Context) {
 		return
 	}
 
-	count, err := dao.GetUnreadCount(ctx.Request.Context(), req.UserId)
+	count, err := messageDAO.GetUnreadCount(ctx.Request.Context(), req.UserId)
 	if err != nil {
 		zap.S().Error("[GetUnreadMessageCount/service/user] Failed to get the number of unread messages ", err)
 		common.InternalError(ctx, "服务器错误")
@@ -159,7 +185,7 @@ func MarkMessagesAsRead(ctx *gin.Context) {
 		return
 	}
 
-	err := dao.ClearUnreadCount(ctx.Request.Context(), req.UserId)
+	err := messageDAO.ClearUnreadCount(ctx.Request.Context(), req.UserId)
 	if err != nil {
 		zap.S().Error("[MarkMessagesAsRead/service/user] Failed to clear the number of unread messages", err)
 		common.InternalError(ctx, "服务器错误")
@@ -182,7 +208,7 @@ func NewUser(ctx *gin.Context) {
 		return
 	}
 
-	_, err := dao.FindUser(req.Name)
+	_, err := getUserDAO().FindUser(req.Name)
 	if err != nil {
 		common.ErrorWithData(ctx, -1, err.Error(), nil)
 		return
@@ -203,7 +229,7 @@ func NewUser(ctx *gin.Context) {
 	user.LoginOutTime = &t
 	user.HeartBeatTime = &t
 
-	dao.CreateUser(user)
+	getUserDAO().CreateUser(user)
 	common.Success(ctx, user, "新增用户成功！")
 }
 
@@ -246,7 +272,7 @@ func UpdataUser(ctx *gin.Context) {
 		return
 	}
 
-	Rsp, err := dao.UpdateUser(user)
+	Rsp, err := getUserDAO().UpdateUser(user)
 	if err != nil {
 		zap.S().Info("更新用户失败", err)
 		common.InternalError(ctx, "修改信息失败")
@@ -269,7 +295,7 @@ func DeleteUser(ctx *gin.Context) {
 	user := models.UserBasic{}
 	user.ID = uint(req.UserId)
 
-	err := dao.DeleteUser(user)
+	err := getUserDAO().DeleteUser(user)
 	if err != nil {
 		zap.S().Info("注销用户失败", err)
 		common.InternalError(ctx, "注销账号失败")

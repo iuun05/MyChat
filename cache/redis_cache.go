@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -29,6 +30,25 @@ const (
 	OnlineExpiration  = 5 * time.Minute
 )
 
+var redisCacheType = &RedisCacheType{}
+
+func GetRedisCache() *RedisCache {
+	return redisCacheType.GetRedisCache()
+}
+
+type RedisCacheType struct {
+	redisCache *RedisCache
+	once       sync.Once
+}
+
+func (r *RedisCacheType) GetRedisCache() *RedisCache {
+	r.once.Do(func() {
+		r.redisCache = NewRedisCache()
+	})
+	return r.redisCache
+}
+
+// redis cache instance
 type RedisCache struct {
 	client *redis.Client
 	// redis ops need context to contral timeout, cancel, trace req

@@ -21,14 +21,12 @@ func NewRelationDAO() *RelationDAO {
 	}
 }
 
-// ===== RelationDAO 方法实现 =====
-
 // FriendList 获取好友列表
 func (r *RelationDAO) FriendList(userId uint) (*[]models.UserBasic, error) {
 	var friends []models.UserBasic
 	var err error
 
-	if cache := r.userDAO.getRedisCache(); cache != nil {
+	if cache := r.userDAO.GetRedisCache(); cache != nil {
 		friends, err = cache.GetFriendsList(userId)
 		if err != nil {
 			zap.S().Warn("[FriendList] Failed to retrieve friend list from cache ", err)
@@ -62,7 +60,7 @@ func (r *RelationDAO) FriendList(userId uint) (*[]models.UserBasic, error) {
 	}
 
 	// Write result to cache
-	if cache := r.userDAO.getRedisCache(); cache != nil {
+	if cache := r.userDAO.GetRedisCache(); cache != nil {
 		if err := cache.SetFriendsList(userId, users); err != nil {
 			zap.S().Warn("[FriendList] Failed to write Friend list to cache ", err)
 		}
@@ -144,7 +142,7 @@ func (r *RelationDAO) AddFriend(userId, TargetId uint) (int, error) {
 	}
 
 	// 清除缓存
-	if cache := r.userDAO.getRedisCache(); cache != nil {
+	if cache := r.userDAO.GetRedisCache(); cache != nil {
 		if err := cache.DeleteFriendsList(userId); err != nil {
 			zap.S().Warn("[AddFriend] Failed to clear user friends cache", zap.Error(err))
 		}
@@ -175,7 +173,7 @@ func (r *RelationDAO) RemoveFriend(userId, targetId uint) error {
 	tx.Commit()
 
 	// 清除缓存
-	if cache := r.userDAO.getRedisCache(); cache != nil {
+	if cache := r.userDAO.GetRedisCache(); cache != nil {
 		if err := cache.DeleteFriendsList(userId); err != nil {
 			zap.S().Warn("[RemoveFriend/dao/relation] Failed to clear user friend list cache", err)
 		}

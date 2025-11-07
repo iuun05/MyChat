@@ -21,7 +21,6 @@ type MessageServiceClient struct {
 }
 
 // NewMessageServiceClient 创建新的 gRPC 客户端
-// addr: gRPC 服务器地址，格式如 "localhost:50051"
 func NewMessageServiceClient(addr string) (*MessageServiceClient, error) {
 	// 建立连接
 	conn, err := grpc.NewClient(

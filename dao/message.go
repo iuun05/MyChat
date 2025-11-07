@@ -24,24 +24,19 @@ type MessageDAO struct {
 	rwLocker  sync.RWMutex           // 读写锁
 }
 
-// NewMessageDAO 创建MessageDAO实例
-func NewMessageDAO() *MessageDAO {
-	return &MessageDAO{
-		clientMap: make(map[int64]*models.Node, 0),
-		rwLocker:  sync.RWMutex{},
-	}
-}
-
-// ===== 全局变量（向后兼容） =====
-var clientMap map[int64]*models.Node = make(map[int64]*models.Node, 0)
-var rwLocker sync.RWMutex
+// var clientMap map[int64]*models.Node = make(map[int64]*models.Node, 0)
+// var rwLocker sync.RWMutex
 var defaultMessageDAO *MessageDAO
 
-func init() {
-	defaultMessageDAO = NewMessageDAO()
-	clientMap = defaultMessageDAO.clientMap
-	// 注意：rwLocker 是独立的全局变量，与 defaultMessageDAO.rwLocker 是同一个锁的引用
-	// 但由于 sync.RWMutex 不能直接复制，这里保持独立，两个锁会同步使用
+// NewMessageDAO 创建MessageDAO实例
+func NewMessageDAO() *MessageDAO {
+	if defaultMessageDAO == nil {
+		defaultMessageDAO = &MessageDAO{
+			clientMap: make(map[int64]*models.Node, 0),
+			rwLocker:  sync.RWMutex{},
+		}
+	}
+	return defaultMessageDAO
 }
 
 // 心跳和消息重发相关常量
@@ -60,11 +55,6 @@ func (m *MessageDAO) generateSeq(node *models.Node) int64 {
 	return node.SeqGenerator
 }
 
-// generateSeq 为Node生成唯一消息序号（向后兼容）
-func generateSeq(node *models.Node) int64 {
-	return defaultMessageDAO.generateSeq(node)
-}
-
 // Chat 建立WebSocket连接
 // 参数：
 //   - userId: 连接的用户ID（发送者），通过Query参数传入
@@ -72,7 +62,7 @@ func generateSeq(node *models.Node) int64 {
 // 说明：
 //   - 接收者ID（targetId）在客户端发送消息时，在消息的JSON中指定
 //   - 消息类型、内容等也是在客户端发送消息时动态指定
-func Chat(w http.ResponseWriter, r *http.Request) {
+func (m *MessageDAO) Chat(w http.ResponseWriter, r *http.Request) {
 	// 1. 获取连接用户的ID（发送者）
 	query := r.URL.Query()
 	Id := query.Get("userId")
@@ -101,7 +91,7 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 	zap.S().Info("WebSocket连接已建立", "userId", userId)
 
 	// 获取群列表
-	comIds, err := GetCommunityList(uint(userId))
+	comIds, err := defaultCommunityDAO.GetCommunityList(uint(userId))
 	if err != nil {
 		zap.S().Warn("获取群列表失败，继续连接: ", err)
 		comIds = &[]models.Community{}
@@ -125,7 +115,7 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 启动消息顺序处理协程（用于处理乱序到达的消息）
-	go orderedMessageProcessor(node, userId)
+	go m.orderedMessageProcessor(node, userId)
 
 	// 设置写入超时，避免阻塞
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -136,9 +126,9 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 将 userid 与 node 绑定
-	rwLocker.Lock()
+	m.rwLocker.Lock()
 	// clientMap[userId] = node
-	if existingNode, exists := clientMap[userId]; exists {
+	if existingNode, exists := m.clientMap[userId]; exists {
 		zap.S().Warn("用户重复连接，关闭旧连接: ", userId)
 		existingNode.Conn.Close()
 		select {
@@ -147,22 +137,22 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		}
 		close(existingNode.DataQueue)
 	}
-	clientMap[userId] = node
-	rwLocker.Unlock()
+	m.clientMap[userId] = node
+	m.rwLocker.Unlock()
 
 	// clear unread message count
 	cctx := context.Background()
-	if err := ClearUnreadCount(cctx, userId); err != nil {
+	if err := m.ClearUnreadCount(cctx, userId); err != nil {
 		zap.S().Warn("清除未读消息计数失败: ", err)
 	}
 
 	// 5. 连接清理逻辑
 	defer func() {
-		rwLocker.Lock()
-		if existingNode, exists := clientMap[userId]; exists && existingNode == node {
-			delete(clientMap, userId)
+		m.rwLocker.Lock()
+		if existingNode, exists := m.clientMap[userId]; exists && existingNode == node {
+			delete(m.clientMap, userId)
 		}
-		rwLocker.Unlock()
+		m.rwLocker.Unlock()
 
 		// 停止心跳定时器
 		if node.HeartbeatTicker != nil {
@@ -200,7 +190,7 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			done <- struct{}{}
 		}()
-		sendProc(node, userId)
+		m.sendProc(node, userId)
 	}()
 
 	//服务接收消息
@@ -208,7 +198,7 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			done <- struct{}{}
 		}()
-		recProc(node, userId)
+		m.recProc(node, userId)
 	}()
 
 	//心跳检测协程
@@ -216,7 +206,7 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			done <- struct{}{}
 		}()
-		heartbeatProc(node, userId)
+		m.heartbeatProc(node, userId)
 	}()
 
 	// 发送欢迎消息（不需要确认，直接发送）
@@ -250,10 +240,13 @@ func Chat(w http.ResponseWriter, r *http.Request) {
 }
 
 // sendProc 发送消息处理，支持消息确认机制
-func sendProc(node *models.Node, userId int64) {
+func (m *MessageDAO) sendProc(node *models.Node, userId int64) {
 	ticker := time.NewTicker(RetryInterval)
 	defer ticker.Stop()
 
+	// 离线发送到 redis 中保存
+
+	// 在线发送到 websocket 中
 	// 单独的重发协程，避免阻塞主循环
 	retryTicker := time.NewTicker(RetryInterval)
 	defer retryTicker.Stop()
@@ -261,7 +254,7 @@ func sendProc(node *models.Node, userId int64) {
 		for {
 			select {
 			case <-retryTicker.C:
-				retryPendingMsgs(node, userId)
+				m.retryPendingMsgs(node, userId)
 			case <-node.CloseChan:
 				return
 			}
@@ -308,7 +301,6 @@ func sendProc(node *models.Node, userId int64) {
 					}
 					node.SeqMutex.Unlock()
 
-					// ✨ 关键修复：ACK必须通过WebSocket发送给客户端，让客户端知道消息已确认
 					if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
 						zap.S().Error("发送ACK给客户端失败", zap.Error(err))
 					} else {
@@ -317,9 +309,9 @@ func sendProc(node *models.Node, userId int64) {
 					continue // ACK处理完毕，不继续后续流程
 				} else {
 					// ACK需要路由到其他发送方Node（TargetId是原始发送方）
-					rwLocker.RLock()
-					targetNode, exists := clientMap[msg.TargetId]
-					rwLocker.RUnlock()
+					m.rwLocker.RLock()
+					targetNode, exists := m.clientMap[msg.TargetId]
+					m.rwLocker.RUnlock()
 
 					if exists {
 						// 路由ACK到发送方的DataQueue，由发送方的sendProc处理
@@ -338,7 +330,7 @@ func sendProc(node *models.Node, userId int64) {
 
 			// 为需要确认的消息分配序号（如果还没有）
 			if msg.Seq == 0 {
-				msg.Seq = generateSeq(node)
+				msg.Seq = m.generateSeq(node)
 				data, _ = json.Marshal(msg)
 			}
 
@@ -382,7 +374,7 @@ func sendProc(node *models.Node, userId int64) {
 }
 
 // orderedMessageProcessor 顺序处理接收缓冲区的消息（处理乱序到达的消息）
-func orderedMessageProcessor(node *models.Node, userId int64) {
+func (m *MessageDAO) orderedMessageProcessor(node *models.Node, userId int64) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -427,7 +419,7 @@ func orderedMessageProcessor(node *models.Node, userId int64) {
 }
 
 // recProc 接收消息处理，支持心跳响应和消息确认
-func recProc(node *models.Node, userId int64) {
+func (m *MessageDAO) recProc(node *models.Node, userId int64) {
 	node.Conn.SetReadDeadline(time.Now().Add(HeartbeatTimeout * 2))
 
 	for {
@@ -481,7 +473,7 @@ func recProc(node *models.Node, userId int64) {
 			if isClientSent {
 				// 如果消息没有序号，分配序号
 				if msg.Seq == 0 {
-					msg.Seq = generateSeq(node)
+					msg.Seq = m.generateSeq(node)
 					// 确保FromId设置为当前用户（发送者）
 					msg.FromId = userId
 					var err error
@@ -492,7 +484,7 @@ func recProc(node *models.Node, userId int64) {
 					}
 				}
 
-				Dispatch(data)
+				m.Dispatch(data)
 			} else {
 				if msg.Seq > 0 {
 					node.SeqMutex.Lock()
@@ -563,7 +555,7 @@ func recProc(node *models.Node, userId int64) {
 							if err := json.Unmarshal(msgData, &processedMsg); err == nil {
 								zap.S().Debugf("顺序处理消息 seq=%d, fromId=%d, userId=%d", processedMsg.Seq, processedMsg.FromId, userId)
 								// 调用sendMsgAndSave处理消息（保存并放入队列）
-								sendMsgAndSave(userId, msgData)
+								m.sendMsgAndSave(userId, msgData)
 							}
 						}
 					} else if msg.Seq > node.ExpectedSeq {
@@ -594,7 +586,7 @@ func recProc(node *models.Node, userId int64) {
 				} else {
 					// 没有序号的消息，直接处理（不发送ACK，不进行去重排序）
 					zap.S().Warnf("收到没有序号的消息 FromId=%d, TargetId=%d", msg.FromId, msg.TargetId)
-					sendMsgAndSave(userId, data)
+					m.sendMsgAndSave(userId, data)
 				}
 			}
 			continue
@@ -606,7 +598,7 @@ func recProc(node *models.Node, userId int64) {
 }
 
 // heartbeatProc 心跳检测和处理协程
-func heartbeatProc(node *models.Node, userId int64) {
+func (m *MessageDAO) heartbeatProc(node *models.Node, userId int64) {
 	defer func() {
 		if node.HeartbeatTicker != nil {
 			node.HeartbeatTicker.Stop()
@@ -637,9 +629,9 @@ func heartbeatProc(node *models.Node, userId int64) {
 
 		case <-timeoutTicker.C:
 			// 检查心跳超时
-			rwLocker.RLock()
+			m.rwLocker.RLock()
 			lastHeartbeat := node.LastHeartbeat
-			rwLocker.RUnlock()
+			m.rwLocker.RUnlock()
 
 			if time.Since(lastHeartbeat) > HeartbeatTimeout {
 				zap.S().Warnf("心跳超时，断开连接 userId=%d, 最后心跳时间=%v", userId, lastHeartbeat)
@@ -656,7 +648,7 @@ func heartbeatProc(node *models.Node, userId int64) {
 
 // retryPendingMsgs 重发待确认消息
 // 注意：重发消息必须通过DataQueue，由sendProc统一写入，避免并发写入WebSocket连接
-func retryPendingMsgs(node *models.Node, userId int64) {
+func (m *MessageDAO) retryPendingMsgs(node *models.Node, userId int64) {
 	node.SeqMutex.Lock()
 	pendingCount := len(node.PendingMsgs)
 	if pendingCount == 0 {
@@ -689,8 +681,8 @@ func retryPendingMsgs(node *models.Node, userId int64) {
 	}
 }
 
-// dispatch 解析消息，聊天类型判断
-func Dispatch(data []byte) {
+// Dispatch 解析消息，聊天类型判断
+func (m *MessageDAO) Dispatch(data []byte) {
 	//解析消息
 	msg := models.Message{}
 	err := json.Unmarshal(data, &msg)
@@ -703,10 +695,10 @@ func Dispatch(data []byte) {
 	switch msg.Type {
 	case models.SingleMessageType: //私聊
 		// 同步处理，保证消息顺序
-		sendMsgAndSave(msg.TargetId, data)
+		m.sendMsgAndSave(msg.TargetId, data)
 	case models.CommunityMessageType: //群发
 		// 同步处理群发消息，保证顺序
-		sendGroupMsg(uint(msg.FromId), uint(msg.TargetId), data)
+		m.sendGroupMsg(uint(msg.FromId), uint(msg.TargetId), data)
 	case models.HeartBeatMessageType: // 心跳消息已在recProc中处理，这里不做处理
 		zap.S().Debug("收到心跳消息")
 	case models.AckMessageType: // ACK确认消息已在recProc中处理，这里不做处理
@@ -717,11 +709,11 @@ func Dispatch(data []byte) {
 	}
 }
 
-// sendMs 向用户单聊发送消息
-func sendMsg(id int64, msg []byte) {
-	rwLocker.Lock()
-	node, ok := clientMap[id]
-	rwLocker.Unlock()
+// sendMsg 向用户单聊发送消息
+func (m *MessageDAO) sendMsg(id int64, msg []byte) {
+	m.rwLocker.RLock()
+	node, ok := m.clientMap[id]
+	m.rwLocker.RUnlock()
 
 	if !ok {
 		zap.S().Info("userID没有对应的node")
@@ -739,7 +731,7 @@ func sendMsg(id int64, msg []byte) {
 // 1. 必须保存到MySQL（持久化，即使失败也要记录）
 // 2. Redis作为缓存，失败不影响消息发送，但会影响性能
 // 3. 消息发送到WebSocket队列
-func sendMsgAndSave(userId int64, msg []byte) {
+func (m *MessageDAO) sendMsgAndSave(userId int64, msg []byte) {
 	jsonMsg := models.Message{}
 	if err := json.Unmarshal(msg, &jsonMsg); err != nil {
 		zap.S().Error("[sendMsgAndSave] 消息解析失败", zap.Error(err))
@@ -816,9 +808,9 @@ func sendMsgAndSave(userId int64, msg []byte) {
 	}
 
 	// 发送消息到WebSocket队列
-	rwLocker.RLock()
-	node, ok := clientMap[userId]
-	rwLocker.RUnlock()
+	m.rwLocker.RLock()
+	node, ok := m.clientMap[userId]
+	m.rwLocker.RUnlock()
 
 	if ok {
 		// 如果当前用户在线，将消息转发到当前用户的websocket连接中
@@ -842,7 +834,8 @@ func sendMsgAndSave(userId int64, msg []byte) {
 	}
 }
 
-func GetRecentMessages(userIdA, userIdB int64, limit int64) ([]string, error) {
+// GetRecentMessages 获取最近消息
+func (m *MessageDAO) GetRecentMessages(userIdA, userIdB int64, limit int64) ([]string, error) {
 	ctx := context.Background()
 	userIdStr := strconv.Itoa(int(userIdA))
 	targetIdStr := strconv.Itoa(int(userIdB))
@@ -864,14 +857,14 @@ func GetRecentMessages(userIdA, userIdB int64, limit int64) ([]string, error) {
 	return messages, nil
 }
 
-// 清除未读消息计数
-func ClearUnreadCount(ctx context.Context, userId int64) error {
+// ClearUnreadCount 清除未读消息计数
+func (m *MessageDAO) ClearUnreadCount(ctx context.Context, userId int64) error {
 	unreadKey := models.UnreadCountPrefix + strconv.Itoa(int(userId))
 	return global.RedisDB.Del(ctx, unreadKey).Err()
 }
 
-// 获取未读消息数量
-func GetUnreadCount(ctx context.Context, userId int64) (int64, error) {
+// GetUnreadCount 获取未读消息数量
+func (m *MessageDAO) GetUnreadCount(ctx context.Context, userId int64) (int64, error) {
 	unreadKey := models.UnreadCountPrefix + strconv.Itoa(int(userId))
 	count, err := global.RedisDB.Get(ctx, unreadKey).Int64()
 	if err == redis.Nil {
@@ -880,24 +873,24 @@ func GetUnreadCount(ctx context.Context, userId int64) (int64, error) {
 	return count, err
 }
 
-// 群发逻辑
-func sendGroupMsg(fromID, target uint, data []byte) (int, error) {
-	userIDs, err := FindUsers(target)
+// sendGroupMsg 群发逻辑
+func (m *MessageDAO) sendGroupMsg(fromID, target uint, data []byte) (int, error) {
+	userIDs, err := defaultCommunityDAO.FindUsers(target)
 	if err != nil {
 		return 1, nil
 	}
 
 	for _, userId := range *userIDs {
 		if fromID != userId {
-			sendMsgAndSave(int64(userId), data)
+			m.sendMsgAndSave(int64(userId), data)
 		}
 	}
 
 	return 0, nil
 }
 
-// 获取缓存里面的聊天记录
-func ReadRedisMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, end int64, isRev bool) []string {
+// ReadRedisMsg 获取缓存里面的聊天记录
+func (m *MessageDAO) ReadRedisMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, end int64, isRev bool) []string {
 	userIdStr := strconv.Itoa(int(userIdA))
 	targetIdStr := strconv.Itoa(int(userIdB))
 
@@ -924,8 +917,9 @@ func ReadRedisMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, e
 	return rels
 }
 
-func GetUnreadMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, end int64, isRev bool) []string {
-	if msgs := ReadRedisMsg(ctx, userIdA, userIdB, start, end, isRev); len(msgs) > 0 {
+// GetUnreadMsg 获取未读消息
+func (m *MessageDAO) GetUnreadMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, end int64, isRev bool) []string {
+	if msgs := m.ReadRedisMsg(ctx, userIdA, userIdB, start, end, isRev); len(msgs) > 0 {
 		return msgs
 	}
 
@@ -981,4 +975,56 @@ func GetUnreadMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, e
 	}
 
 	return msgs
+}
+
+// ===== 向后兼容的全局函数 =====
+
+// generateSeq 为Node生成唯一消息序号（向后兼容）
+func generateSeq(node *models.Node) int64 {
+	return defaultMessageDAO.generateSeq(node)
+}
+
+// Chat 建立WebSocket连接（向后兼容）
+func Chat(w http.ResponseWriter, r *http.Request) {
+	defaultMessageDAO.Chat(w, r)
+}
+
+// Dispatch 解析消息，聊天类型判断（向后兼容）
+func Dispatch(data []byte) {
+	defaultMessageDAO.Dispatch(data)
+}
+
+// sendMsgAndSave 发送消息并存储聊天记录（向后兼容）
+func sendMsgAndSave(userId int64, msg []byte) {
+	defaultMessageDAO.sendMsgAndSave(userId, msg)
+}
+
+// GetRecentMessages 获取最近消息（向后兼容）
+func GetRecentMessages(userIdA, userIdB int64, limit int64) ([]string, error) {
+	return defaultMessageDAO.GetRecentMessages(userIdA, userIdB, limit)
+}
+
+// ClearUnreadCount 清除未读消息计数（向后兼容）
+func ClearUnreadCount(ctx context.Context, userId int64) error {
+	return defaultMessageDAO.ClearUnreadCount(ctx, userId)
+}
+
+// GetUnreadCount 获取未读消息数量（向后兼容）
+func GetUnreadCount(ctx context.Context, userId int64) (int64, error) {
+	return defaultMessageDAO.GetUnreadCount(ctx, userId)
+}
+
+// sendGroupMsg 群发逻辑（向后兼容）
+func sendGroupMsg(fromID, target uint, data []byte) (int, error) {
+	return defaultMessageDAO.sendGroupMsg(fromID, target, data)
+}
+
+// ReadRedisMsg 获取缓存里面的聊天记录（向后兼容）
+func ReadRedisMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, end int64, isRev bool) []string {
+	return defaultMessageDAO.ReadRedisMsg(ctx, userIdA, userIdB, start, end, isRev)
+}
+
+// GetUnreadMsg 获取未读消息（向后兼容）
+func GetUnreadMsg(ctx *gin.Context, userIdA int64, userIdB int64, start int64, end int64, isRev bool) []string {
+	return defaultMessageDAO.GetUnreadMsg(ctx, userIdA, userIdB, start, end, isRev)
 }
