@@ -25,16 +25,17 @@ const (
 
 type Message struct {
 	Model
-	FromId   int64  `json:"userId"`   //信息发送者
-	TargetId int64  `json:"targetId"` //信息接收者
-	Seq      int64  `json:"seq"`      //消息序号
-	Type     int    //聊天类型：群聊 私聊 广播
-	Media    int    //信息类型：文字 图片 音频
-	Content  string //消息内容
-	Pic      string `json:"url"` //图片相关
-	Url      string //文件相关
-	Desc     string //文件描述
-	Amount   int    //其他数据大小
+	MessageId string `json:"messageId,omitempty"` // 全局唯一消息ID（新增）
+	FromId    int64  `json:"userId"`              //信息发送者
+	TargetId  int64  `json:"targetId"`            //信息接收者
+	Seq       int64  `json:"seq"`                 //消息序号
+	Type      int    //聊天类型：群聊 私聊 广播
+	Media     int    //信息类型：文字 图片 音频
+	Content   string //消息内容
+	Pic       string `json:"url"` //图片相关
+	Url       string //文件相关
+	Desc      string //文件描述
+	Amount    int    //其他数据大小
 }
 
 // MsgTableName 生成指定数据表名

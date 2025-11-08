@@ -22,6 +22,7 @@ import (
 type MessageDAO struct {
 	clientMap map[int64]*models.Node // 用户连接映射（WebSocket）
 	rwLocker  sync.RWMutex           // 读写锁
+	shardDAO  *MessageShardDAO       // 分表DAO
 }
 
 // var clientMap map[int64]*models.Node = make(map[int64]*models.Node, 0)
@@ -34,6 +35,7 @@ func NewMessageDAO() *MessageDAO {
 		defaultMessageDAO = &MessageDAO{
 			clientMap: make(map[int64]*models.Node, 0),
 			rwLocker:  sync.RWMutex{},
+			shardDAO:  NewMessageShardDAO(),
 		}
 	}
 	return defaultMessageDAO
@@ -756,12 +758,29 @@ func (m *MessageDAO) sendMsgAndSave(userId int64, msg []byte) {
 		key = "msg_" + targetIdStr + "_" + userIdStr
 	}
 
-	// 保存消息到MySQL
+	// 保存消息到MySQL（使用分表）
 	if global.DB != nil {
-		if err := global.DB.Create(&jsonMsg).Error; err != nil {
-			zap.S().Error("[sendMsgAndSave] Failed to persist message into MySQL", zap.Error(err))
+		if jsonMsg.Type == models.SingleMessageType {
+			// 私聊消息：使用分表保存
+			_, err := m.shardDAO.SavePrivateMessage(
+				jsonMsg.FromId,
+				userId,
+				jsonMsg.Content,
+				jsonMsg.Media,
+				jsonMsg.Seq,
+			)
+			if err != nil {
+				zap.S().Error("[sendMsgAndSave] Failed to persist private message into MySQL", zap.Error(err))
+			} else {
+				zap.S().Debugf("[sendMsgAndSave] 私聊消息已保存到MySQL seq=%d, fromId=%d, toId=%d", jsonMsg.Seq, jsonMsg.FromId, userId)
+			}
 		} else {
-			zap.S().Debugf("[sendMsgAndSave] 消息已保存到MySQL seq=%d, fromId=%d, toId=%d", jsonMsg.Seq, jsonMsg.FromId, userId)
+			// 其他类型消息：兼容旧表结构
+			if err := global.DB.Create(&jsonMsg).Error; err != nil {
+				zap.S().Error("[sendMsgAndSave] Failed to persist message into MySQL", zap.Error(err))
+			} else {
+				zap.S().Debugf("[sendMsgAndSave] 消息已保存到MySQL seq=%d, fromId=%d, toId=%d", jsonMsg.Seq, jsonMsg.FromId, userId)
+			}
 		}
 	} else {
 		zap.S().Warn("[sendMsgAndSave] MySQL数据库连接未初始化，跳过持久化")
@@ -873,20 +892,125 @@ func (m *MessageDAO) GetUnreadCount(ctx context.Context, userId int64) (int64, e
 	return count, err
 }
 
-// sendGroupMsg 群发逻辑
+// sendGroupMsg 群发逻辑（优化：群消息只保存一次）
 func (m *MessageDAO) sendGroupMsg(fromID, target uint, data []byte) (int, error) {
-	userIDs, err := defaultCommunityDAO.FindUsers(target)
-	if err != nil {
-		return 1, nil
+	// 解析消息
+	var jsonMsg models.Message
+	if err := json.Unmarshal(data, &jsonMsg); err != nil {
+		zap.S().Error("[sendGroupMsg] 消息解析失败", zap.Error(err))
+		return 1, err
 	}
 
-	for _, userId := range *userIDs {
-		if fromID != userId {
-			m.sendMsgAndSave(int64(userId), data)
+	groupId := int64(target)
+	fromId := int64(fromID)
+
+	// 获取群最大序号
+	maxSeq, err := m.shardDAO.GetGroupMaxSeq(groupId)
+	if err != nil {
+		zap.S().Warnf("[sendGroupMsg] 获取群最大序号失败，使用消息中的seq groupId=%d", groupId)
+		maxSeq = jsonMsg.Seq
+	}
+	if jsonMsg.Seq == 0 || jsonMsg.Seq <= maxSeq {
+		maxSeq++
+		jsonMsg.Seq = maxSeq
+	}
+
+	// 保存群消息（只保存一次，所有成员共享）
+	groupMsg, err := m.shardDAO.SaveGroupMessageWithCache(
+		groupId,
+		fromId,
+		jsonMsg.Content,
+		jsonMsg.Media,
+		jsonMsg.Seq,
+	)
+	if err != nil {
+		zap.S().Errorf("[sendGroupMsg] 保存群消息失败 groupId=%d", groupId, zap.Error(err))
+		return 1, err
+	}
+
+	// 更新消息中的seq
+	jsonMsg.Seq = groupMsg.Seq
+	jsonMsg.MessageId = groupMsg.MessageId
+	updatedData, _ := json.Marshal(jsonMsg)
+
+	// 获取群成员列表
+	members, err := m.shardDAO.GetGroupMembers(groupId)
+	if err != nil {
+		zap.S().Warnf("[sendGroupMsg] 获取群成员失败，使用旧方法 groupId=%d", groupId)
+		// 降级到旧方法
+		userIDs, err2 := defaultCommunityDAO.FindUsers(target)
+		if err2 != nil {
+			return 1, err2
+		}
+		for _, userId := range *userIDs {
+			if fromID != userId {
+				m.sendMsgAndSave(int64(userId), updatedData)
+			}
+		}
+		return 0, nil
+	}
+
+	// 并发推送消息给所有成员（不保存，只推送）
+	var wg sync.WaitGroup
+	for _, member := range members {
+		if int64(member.UserId) != fromId && member.Status == models.GroupMemberStatusNormal {
+			wg.Add(1)
+			go func(userId int64) {
+				defer wg.Done()
+				// 只推送，不保存（群消息已统一保存）
+				m.pushMessageToUser(userId, updatedData)
+			}(int64(member.UserId))
 		}
 	}
+	wg.Wait()
 
+	zap.S().Debugf("[sendGroupMsg] 群消息已发送 groupId=%d, seq=%d, members=%d", groupId, groupMsg.Seq, len(members))
 	return 0, nil
+}
+
+// pushMessageToUser 推送消息给用户（不保存）
+func (m *MessageDAO) pushMessageToUser(userId int64, msg []byte) {
+	ctx := context.Background()
+
+	// 更新Redis缓存
+	var jsonMsg models.Message
+	if err := json.Unmarshal(msg, &jsonMsg); err != nil {
+		return
+	}
+
+	targetIdStr := strconv.Itoa(int(userId))
+	userIdStr := strconv.Itoa(int(jsonMsg.FromId))
+
+	var key string
+	if userId > jsonMsg.FromId {
+		key = "msg_" + userIdStr + "_" + targetIdStr
+	} else {
+		key = "msg_" + targetIdStr + "_" + userIdStr
+	}
+
+	// 更新Redis缓存
+	score := float64(time.Now().Unix())
+	memberKey := string(msg)
+	global.RedisDB.ZAdd(ctx, key, redis.Z{Score: score, Member: memberKey})
+
+	// 发送消息到WebSocket队列
+	m.rwLocker.RLock()
+	node, ok := m.clientMap[userId]
+	m.rwLocker.RUnlock()
+
+	if ok {
+		select {
+		case node.DataQueue <- msg:
+			zap.S().Debugf("[pushMessageToUser] 消息已放入WebSocket队列 userId=%d, seq=%d", userId, jsonMsg.Seq)
+		default:
+			zap.S().Warnf("[pushMessageToUser] 用户消息队列已满 userId=%d, seq=%d", userId, jsonMsg.Seq)
+		}
+	} else {
+		// 用户不在线，增加未读计数
+		unreadKey := models.UnreadCountPrefix + targetIdStr
+		global.RedisDB.Incr(ctx, unreadKey)
+		global.RedisDB.Expire(ctx, unreadKey, 30*24*time.Hour)
+	}
 }
 
 // ReadRedisMsg 获取缓存里面的聊天记录

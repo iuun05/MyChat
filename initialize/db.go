@@ -47,12 +47,18 @@ func InitDB() {
 		&models.UserBasic{},
 		&models.Relation{},
 		&models.Community{},
-		&models.Message{},
+		&models.Message{}, // 保留旧表，用于兼容
 	)
 	if err != nil {
 		zap.S().Error("数据库迁移失败", zap.Error(err))
 		panic(err)
 	}
+
+	// 初始化分表
+	InitShardingTables()
+
+	// 创建分表索引
+	CreateShardingIndexes()
 
 	zap.S().Info("数据库迁移成功，所有表结构已更新")
 	fmt.Println("mysql init successfully")
