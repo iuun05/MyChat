@@ -3,6 +3,7 @@ package dao
 import (
 	"MyChat/global"
 	"MyChat/models"
+	"MyChat/mq/kafka"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,9 +21,20 @@ import (
 
 // MessageDAO 消息数据访问对象
 type MessageDAO struct {
-	clientMap map[int64]*models.Node // 用户连接映射（WebSocket）
-	rwLocker  sync.RWMutex           // 读写锁
-	shardDAO  *MessageShardDAO       // 分表DAO
+	clientMap     map[int64]*models.Node // 用户连接映射（WebSocket）
+	rwLocker      sync.RWMutex           // 读写锁
+	shardDAO      *MessageShardDAO       // 分表DAO
+	kafkaProducer *kafka.MessageProducer // Kafka生产者
+}
+
+// GetShardDAODirect 获取分表DAO（供内部使用，返回具体类型）
+func (m *MessageDAO) GetShardDAODirect() *MessageShardDAO {
+	return m.shardDAO
+}
+
+// GetShardDAO 实现kafka.MessageHandler接口（供Kafka使用）
+func (m *MessageDAO) GetShardDAO() kafka.ShardDAO {
+	return &MessageShardDAOWrapper{MessageShardDAO: m.shardDAO}
 }
 
 // var clientMap map[int64]*models.Node = make(map[int64]*models.Node, 0)
@@ -33,12 +45,18 @@ var defaultMessageDAO *MessageDAO
 func NewMessageDAO() *MessageDAO {
 	if defaultMessageDAO == nil {
 		defaultMessageDAO = &MessageDAO{
-			clientMap: make(map[int64]*models.Node, 0),
-			rwLocker:  sync.RWMutex{},
-			shardDAO:  NewMessageShardDAO(),
+			clientMap:     make(map[int64]*models.Node, 0),
+			rwLocker:      sync.RWMutex{},
+			shardDAO:      NewMessageShardDAO(),
+			kafkaProducer: kafka.GetDefaultProducer(), // 获取Kafka生产者（可能为nil，如果未初始化）
 		}
 	}
 	return defaultMessageDAO
+}
+
+// SetKafkaProducer 设置Kafka生产者
+func (m *MessageDAO) SetKafkaProducer(producer *kafka.MessageProducer) {
+	m.kafkaProducer = producer
 }
 
 // 心跳和消息重发相关常量
@@ -933,10 +951,10 @@ func (m *MessageDAO) sendGroupMsg(fromID, target uint, data []byte) (int, error)
 	jsonMsg.MessageId = groupMsg.MessageId
 	updatedData, _ := json.Marshal(jsonMsg)
 
-	// 获取群成员列表
+	// 获取群成员列表（用于降级方案）
 	members, err := m.shardDAO.GetGroupMembers(groupId)
 	if err != nil {
-		zap.S().Warnf("[sendGroupMsg] 获取群成员失败，使用旧方法 groupId=%d", groupId)
+		zap.S().Warnf("[sendGroupMsg] 获取群成员失败，使用旧方法 groupId=%d", groupId, zap.Error(err))
 		// 降级到旧方法
 		userIDs, err2 := defaultCommunityDAO.FindUsers(target)
 		if err2 != nil {
@@ -950,22 +968,73 @@ func (m *MessageDAO) sendGroupMsg(fromID, target uint, data []byte) (int, error)
 		return 0, nil
 	}
 
+	// 优先使用Kafka消息队列（异步推送）
+	if m.kafkaProducer != nil {
+		// 发送到Kafka队列，立即返回（不等待推送完成）
+		if err := m.kafkaProducer.SendGroupChatMessage(
+			groupId,
+			fromId,
+			updatedData,
+			groupMsg.Seq,
+			groupMsg.MessageId,
+		); err != nil {
+			zap.S().Warnf("[sendGroupMsg] 发送到Kafka失败，降级到同步推送 groupId=%d", groupId, zap.Error(err))
+			// 降级到同步推送
+			return m.sendGroupMsgSync(groupId, fromId, updatedData, members)
+		}
+
+		zap.S().Debugf("[sendGroupMsg] 群消息已保存并发送到Kafka groupId=%d, seq=%d, messageId=%s",
+			groupId, groupMsg.Seq, groupMsg.MessageId)
+		return 0, nil
+	}
+
+	// Kafka未初始化，使用同步推送（降级方案）
+	return m.sendGroupMsgSync(groupId, fromId, updatedData, members)
+}
+
+// sendGroupMsgSync 同步推送群消息（降级方案）
+func (m *MessageDAO) sendGroupMsgSync(groupId, fromId int64, updatedData []byte, members []*models.GroupMember) (int, error) {
+	// 如果没有传入成员列表，则获取
+	if members == nil {
+		var err error
+		members, err = m.shardDAO.GetGroupMembers(groupId)
+		if err != nil {
+			zap.S().Warnf("[sendGroupMsgSync] 获取群成员失败，使用旧方法 groupId=%d", groupId)
+			// 降级到旧方法
+			userIDs, err2 := defaultCommunityDAO.FindUsers(uint(groupId))
+			if err2 != nil {
+				return 1, err2
+			}
+			for _, userId := range *userIDs {
+				if uint(fromId) != userId {
+					m.sendMsgAndSave(int64(userId), updatedData)
+				}
+			}
+			return 0, nil
+		}
+	}
+
 	// 并发推送消息给所有成员（不保存，只推送）
 	var wg sync.WaitGroup
 	for _, member := range members {
-		if int64(member.UserId) != fromId && member.Status == models.GroupMemberStatusNormal {
+		if member.UserId != fromId && member.Status == models.GroupMemberStatusNormal {
 			wg.Add(1)
 			go func(userId int64) {
 				defer wg.Done()
 				// 只推送，不保存（群消息已统一保存）
 				m.pushMessageToUser(userId, updatedData)
-			}(int64(member.UserId))
+			}(member.UserId)
 		}
 	}
 	wg.Wait()
 
-	zap.S().Debugf("[sendGroupMsg] 群消息已发送 groupId=%d, seq=%d, members=%d", groupId, groupMsg.Seq, len(members))
+	zap.S().Debugf("[sendGroupMsgSync] 群消息已同步推送 groupId=%d, members=%d", groupId, len(members))
 	return 0, nil
+}
+
+// PushMessageToUser 推送消息给用户（不保存）- 公开方法供外部调用
+func (m *MessageDAO) PushMessageToUser(userId int64, msg []byte) {
+	m.pushMessageToUser(userId, msg)
 }
 
 // pushMessageToUser 推送消息给用户（不保存）

@@ -24,6 +24,9 @@ func main() {
 
 	initialize.InitRedis()
 
+	// 初始化Kafka（可选，如果配置了Kafka则初始化）
+	initialize.InitKafka()
+
 	// 初始化gRPC服务器
 	grpcServer := rpc.InitGRPC()
 
@@ -34,7 +37,7 @@ func main() {
 	// 启动HTTP服务器（Gin）
 	go func() {
 		defer wg.Done()
-	router := router.Router()
+		router := router.Router()
 		port := global.ServiceConfig.Port
 		if port == 0 {
 			port = 8080
