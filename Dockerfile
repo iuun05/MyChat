@@ -23,3 +23,5 @@ COPY --from=builder /MyChat/asset ./asset
 EXPOSE 8080
 
 CMD ["./mychat"]
+
+

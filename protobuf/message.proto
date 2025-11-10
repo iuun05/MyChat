@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package message;
+
+option go_package = "MyChat/protobuf/message";
+
+import "google/protobuf/timestamp.proto";
+
+// 消息服务
+service MessageService {
+  // 发送消息（单播）
+  rpc SendMessage(MessageRequest) returns (MessageResponse);
+  
+  // 流式发送消息（支持批量）
+  rpc StreamMessages(stream MessageRequest) returns (stream MessageResponse);
+  
+  // 心跳检测
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  
+  // 消息确认
+  rpc AcknowledgeMessage(AckRequest) returns (AckResponse);
+}
+
+// 消息请求
+message MessageRequest {
+  int64 seq = 1;                      // 消息序号（可选，服务器可自动生成）
+  int64 from_id = 2;                  // 发送者ID（必填）
+  int64 target_id = 3;                // 接收者ID（必填）
+  MessageType type = 4;               // 消息类型（必填）
+  MediaType media = 5;                // 媒体类型（必填）
+  string content = 6;                // 消息内容（必填）
+  string pic = 7;                     // 图片URL（可选，当media=IMAGE时使用）
+  string url = 8;                     // 文件URL（可选，当media=FILE/VIDEO/AUDIO时使用）
+  string desc = 9;                    // 文件描述（可选）
+  int32 amount = 10;                  // 数据大小（可选，单位：字节）
+  google.protobuf.Timestamp timestamp = 11; // 时间戳（可选，服务器可自动生成）
+}
+
+// 消息响应
+message MessageResponse {
+  int64 seq = 1;                      // 消息序号（服务器分配）
+  bool success = 2;                   // 是否成功
+  string error_msg = 3;               // 错误信息（失败时返回）
+  int64 last_ack_seq = 4;            // 最后确认的序号（可选）
+}
+
+// 心跳请求
+message HeartbeatRequest {
+  int64 user_id = 1;                  // 用户ID（必填，用于标识连接）
+  int64 server_id = 2;                // 服务器ID（可选，用于多服务器场景）
+  google.protobuf.Timestamp timestamp = 3; // 时间戳（可选）
+}
+
+// 心跳响应
+message HeartbeatResponse {
+  bool alive = 1;                     // 是否存活
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+// ACK确认请求
+message AckRequest {
+  int64 seq = 1;                      // 确认的消息序号（必填）
+  int64 from_id = 2;                  // 发送ACK的用户ID（必填，接收方ID）
+  int64 target_id = 3;                // 原始发送方ID（必填）
+}
+
+// ACK确认响应
+message AckResponse {
+  bool success = 1;                   // 是否成功
+  int64 ack_seq = 2;                  // 已确认的最大序号
+}
+
+// 消息类型枚举
+enum MessageType {
+  MESSAGE_TYPE_UNKNOWN = 0;
+  MESSAGE_TYPE_SINGLE = 1;            // 私聊
+  MESSAGE_TYPE_COMMUNITY = 2;         // 群聊
+  MESSAGE_TYPE_BROADCAST = 3;         // 广播
+  MESSAGE_TYPE_HEARTBEAT = 4;        // 心跳
+  MESSAGE_TYPE_ACK = 5;               // ACK
+}
+
+// 媒体类型枚举
+enum MediaType {
+  MEDIA_TYPE_UNKNOWN = 0;
+  MEDIA_TYPE_TEXT = 1;                // 文字
+  MEDIA_TYPE_IMAGE = 2;               // 图片
+  MEDIA_TYPE_AUDIO = 3;               // 音频
+  MEDIA_TYPE_VIDEO = 4;               // 视频
+  MEDIA_TYPE_FILE = 5;                // 文件
+  // 注意：Go模型中Media字段注释为"信息类型：文字 图片 音频"，但proto定义更完整
+  // 建议Go代码也支持VIDEO和FILE类型
+}
+

@@ -1,10 +1,19 @@
-port: '8000'
+port: '8080'
+grpc_port: '50051'
 mysql:
-  host: 'host.docker.internal'
+  # host: 'host.docker.internal'
+  host: '127.0.0.1'
   port: '3306'
   name: 'MyChat'
   user: 'root'
-  password: ''
+  password: 'root'
 redis:
-  host: 'host.docker.internal'
+  # host: 'host.docker.internal'
+  host: '127.0.0.1'
   port: '6379'
+kafka:
+  brokers:
+    - 'localhost:9092'
+  topic: 'group_chat_messages'
+  group_id: 'group_chat_consumers'
+  worker_count: 10  

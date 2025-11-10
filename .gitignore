@@ -1,0 +1,9 @@
+# 日志文件
+*.log
+logs/
+
+# 测试结果
+test_results/
+coverage.out
+coverage.html
+docs/

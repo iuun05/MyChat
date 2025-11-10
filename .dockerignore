@@ -1,0 +1,62 @@
+# Git相关
+.git
+.gitignore
+.gitattributes
+
+# 测试相关
+test_results/
+*_test.go
+*_test.log
+coverage.out
+coverage.html
+
+# 构建产物
+mychat
+*.exe
+*.dll
+*.so
+*.dylib
+
+# 开发工具
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志文件
+*.log
+logs/
+
+# 临时文件
+tmp/
+temp/
+.tmp/
+
+# 文档
+README.md
+USAGE_GUIDE.md
+PROJECT_ARCHITECTURE.md
+*.md
+
+# 脚本文件
+run_tests.sh
+Makefile
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 环境配置
+.env
+.env.local
+.env.production
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# 缓存文件
+.cache/
+node_modules/
