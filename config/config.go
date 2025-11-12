@@ -15,10 +15,13 @@ type RedisConfig struct {
 }
 
 type KafkaConfig struct {
-	Brokers     []string `mapstructure:"brokers" json:"brokers"`           // Kafka broker地址列表
-	Topic       string   `mapstructure:"topic" json:"topic"`               // 群聊消息topic
-	GroupID     string   `mapstructure:"group_id" json:"group_id"`         // 消费者组ID
-	WorkerCount int      `mapstructure:"worker_count" json:"worker_count"` // 消费者worker数量
+	Brokers            []string `mapstructure:"brokers" json:"brokers"`                           // Kafka broker地址列表
+	GroupTopic         string   `mapstructure:"group_topic" json:"group_topic"`                   // 群聊消息topic
+	PrivateTopic       string   `mapstructure:"private_topic" json:"private_topic"`               // 单聊消息topic
+	GroupID            string   `mapstructure:"group_id" json:"group_id"`                         // 群聊消费者组ID
+	PrivateGroupID     string   `mapstructure:"private_group_id" json:"private_group_id"`         // 单聊消费者组ID
+	WorkerCount        int      `mapstructure:"worker_count" json:"worker_count"`                 // 消费者worker数量
+	PrivateWorkerCount int      `mapstructure:"private_worker_count" json:"private_worker_count"` // 单聊消费者worker数量
 }
 
 type ServiceConfig struct {

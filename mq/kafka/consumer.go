@@ -96,21 +96,33 @@ func (c *MessageConsumer) consumeWorker(workerID int) {
 	}
 }
 
-// processMessage 处理单条消息
+// processMessage 处理单条消息（支持群聊和单聊）
 func (c *MessageConsumer) processMessage(msg kafka.Message) error {
-	// 解析消息
+	// 先尝试解析为群聊消息
 	var groupMsg GroupChatMessage
-	if err := json.Unmarshal(msg.Value, &groupMsg); err != nil {
-		zap.S().Errorf("[processMessage] 消息解析失败 offset=%d", msg.Offset, zap.Error(err))
-		return fmt.Errorf("消息解析失败: %w", err)
+	if err := json.Unmarshal(msg.Value, &groupMsg); err == nil && groupMsg.GroupId > 0 {
+		return c.processGroupMessage(groupMsg)
 	}
 
-	zap.S().Debugf("[processMessage] 收到群消息 groupId=%d, seq=%d, offset=%d", groupMsg.GroupId, groupMsg.Seq, msg.Offset)
+	// 尝试解析为单聊消息
+	var privateMsg PrivateChatMessage
+	if err := json.Unmarshal(msg.Value, &privateMsg); err == nil && privateMsg.ToId > 0 {
+		return c.processPrivateMessage(privateMsg)
+	}
+
+	// 两种消息类型都不匹配，记录错误
+	zap.S().Errorf("[processMessage] 未知消息类型 offset=%d, topic=%s", msg.Offset, c.topic)
+	return fmt.Errorf("未知消息类型，无法解析")
+}
+
+// processGroupMessage 处理群聊消息
+func (c *MessageConsumer) processGroupMessage(groupMsg GroupChatMessage) error {
+	zap.S().Debugf("[processGroupMessage] 收到群消息 groupId=%d, seq=%d", groupMsg.GroupId, groupMsg.Seq)
 
 	// 获取群成员列表
 	memberInterfaces, err := c.messageHandler.GetShardDAO().GetGroupMembers(groupMsg.GroupId)
 	if err != nil {
-		zap.S().Errorf("[processMessage] 获取群成员失败 groupId=%d", groupMsg.GroupId, zap.Error(err))
+		zap.S().Errorf("[processGroupMessage] 获取群成员失败 groupId=%d", groupMsg.GroupId, zap.Error(err))
 		return fmt.Errorf("获取群成员失败: %w", err)
 	}
 
@@ -122,7 +134,7 @@ func (c *MessageConsumer) processMessage(msg kafka.Message) error {
 		// 类型断言
 		member, ok := memberInterface.(GroupMember)
 		if !ok {
-			zap.S().Warnf("[processMessage] 成员类型断言失败 groupId=%d", groupMsg.GroupId)
+			zap.S().Warnf("[processGroupMessage] 成员类型断言失败 groupId=%d", groupMsg.GroupId)
 			continue
 		}
 
@@ -149,8 +161,21 @@ func (c *MessageConsumer) processMessage(msg kafka.Message) error {
 	// 等待所有推送完成
 	wg.Wait()
 
-	zap.S().Debugf("[processMessage] 群消息已处理 groupId=%d, seq=%d, members=%d, pushed=%d",
+	zap.S().Debugf("[processGroupMessage] 群消息已处理 groupId=%d, seq=%d, members=%d, pushed=%d",
 		groupMsg.GroupId, groupMsg.Seq, len(memberInterfaces), pushCount)
+
+	return nil
+}
+
+// processPrivateMessage 处理单聊消息
+func (c *MessageConsumer) processPrivateMessage(privateMsg PrivateChatMessage) error {
+	zap.S().Debugf("[processPrivateMessage] 收到单聊消息 fromId=%d, toId=%d, seq=%d", privateMsg.FromId, privateMsg.ToId, privateMsg.Seq)
+
+	// 单聊消息直接推送给接收者（消息已经在发送前持久化到数据库）
+	c.messageHandler.PushMessageToUser(privateMsg.ToId, privateMsg.Message)
+
+	zap.S().Debugf("[processPrivateMessage] 单聊消息已处理 fromId=%d, toId=%d, seq=%d",
+		privateMsg.FromId, privateMsg.ToId, privateMsg.Seq)
 
 	return nil
 }

@@ -747,10 +747,11 @@ func (m *MessageDAO) sendMsg(id int64, msg []byte) {
 }
 
 // sendMsgAndSave 发送消息并存储聊天记录
-// 数据持久化策略：MySQL为主存储，Redis作为缓存
+// 数据持久化策略：MySQL为主存储，Redis作为缓存，Kafka作为消息队列
 // 1. 必须保存到MySQL（持久化，即使失败也要记录）
 // 2. Redis作为缓存，失败不影响消息发送，但会影响性能
-// 3. 消息发送到WebSocket队列
+// 3. 消息发送到Kafka队列（异步推送）
+// 4. 如果Kafka不可用，降级到同步推送
 func (m *MessageDAO) sendMsgAndSave(userId int64, msg []byte) {
 	jsonMsg := models.Message{}
 	if err := json.Unmarshal(msg, &jsonMsg); err != nil {
@@ -776,11 +777,13 @@ func (m *MessageDAO) sendMsgAndSave(userId int64, msg []byte) {
 		key = "msg_" + targetIdStr + "_" + userIdStr
 	}
 
-	// 保存消息到MySQL（使用分表）
+	var messageId string
+
+	// 保存消息到MySQL（使用分表）- 必须先持久化
 	if global.DB != nil {
 		if jsonMsg.Type == models.SingleMessageType {
 			// 私聊消息：使用分表保存
-			_, err := m.shardDAO.SavePrivateMessage(
+			privateMsg, err := m.shardDAO.SavePrivateMessage(
 				jsonMsg.FromId,
 				userId,
 				jsonMsg.Content,
@@ -789,19 +792,27 @@ func (m *MessageDAO) sendMsgAndSave(userId int64, msg []byte) {
 			)
 			if err != nil {
 				zap.S().Error("[sendMsgAndSave] Failed to persist private message into MySQL", zap.Error(err))
-			} else {
-				zap.S().Debugf("[sendMsgAndSave] 私聊消息已保存到MySQL seq=%d, fromId=%d, toId=%d", jsonMsg.Seq, jsonMsg.FromId, userId)
+				// 数据库保存失败，无法继续处理，直接返回
+				return
 			}
+			messageId = privateMsg.MessageId
+			jsonMsg.MessageId = messageId
+			// 更新消息数据，包含messageId
+			msg, _ = json.Marshal(jsonMsg)
+			zap.S().Debugf("[sendMsgAndSave] 私聊消息已保存到MySQL seq=%d, fromId=%d, toId=%d, messageId=%s", jsonMsg.Seq, jsonMsg.FromId, userId, messageId)
 		} else {
 			// 其他类型消息：兼容旧表结构
 			if err := global.DB.Create(&jsonMsg).Error; err != nil {
 				zap.S().Error("[sendMsgAndSave] Failed to persist message into MySQL", zap.Error(err))
-			} else {
-				zap.S().Debugf("[sendMsgAndSave] 消息已保存到MySQL seq=%d, fromId=%d, toId=%d", jsonMsg.Seq, jsonMsg.FromId, userId)
+				// 数据库保存失败，无法继续处理，直接返回
+				return
 			}
+			zap.S().Debugf("[sendMsgAndSave] 消息已保存到MySQL seq=%d, fromId=%d, toId=%d", jsonMsg.Seq, jsonMsg.FromId, userId)
 		}
 	} else {
 		zap.S().Warn("[sendMsgAndSave] MySQL数据库连接未初始化，跳过持久化")
+		// 数据库未初始化，无法继续处理，直接返回
+		return
 	}
 
 	// 保存消息到Redis ZSet（缓存）
@@ -844,6 +855,32 @@ func (m *MessageDAO) sendMsgAndSave(userId int64, msg []byte) {
 		}
 	}
 
+	// 单聊消息：优先使用Kafka消息队列（异步推送）
+	if jsonMsg.Type == models.SingleMessageType && m.kafkaProducer != nil {
+		// 发送到Kafka队列，立即返回（不等待推送完成）
+		if err := m.kafkaProducer.SendPrivateChatMessage(
+			jsonMsg.FromId,
+			userId,
+			msg,
+			jsonMsg.Seq,
+			messageId,
+		); err != nil {
+			zap.S().Warnf("[sendMsgAndSave] 发送到Kafka失败，降级到同步推送 fromId=%d, toId=%d", jsonMsg.FromId, userId, zap.Error(err))
+			// 降级到同步推送
+			m.sendPrivateMsgSync(userId, msg)
+		} else {
+			zap.S().Debugf("[sendMsgAndSave] 单聊消息已保存并发送到Kafka fromId=%d, toId=%d, seq=%d, messageId=%s",
+				jsonMsg.FromId, userId, jsonMsg.Seq, messageId)
+		}
+		return
+	}
+
+	// Kafka未初始化或非单聊消息，使用同步推送（降级方案）
+	m.sendPrivateMsgSync(userId, msg)
+}
+
+// sendPrivateMsgSync 同步推送单聊消息（降级方案）
+func (m *MessageDAO) sendPrivateMsgSync(userId int64, msg []byte) {
 	// 发送消息到WebSocket队列
 	m.rwLocker.RLock()
 	node, ok := m.clientMap[userId]
@@ -853,21 +890,23 @@ func (m *MessageDAO) sendMsgAndSave(userId int64, msg []byte) {
 		// 如果当前用户在线，将消息转发到当前用户的websocket连接中
 		select {
 		case node.DataQueue <- msg:
-			zap.S().Debugf("[sendMsgAndSave] 消息已放入WebSocket队列 userId=%d, seq=%d", userId, jsonMsg.Seq)
+			zap.S().Debugf("[sendPrivateMsgSync] 消息已放入WebSocket队列 userId=%d", userId)
 		default:
-			zap.S().Warnf("[sendMsgAndSave] 用户消息队列已满，消息可能延迟 userId=%d, seq=%d", userId, jsonMsg.Seq)
+			zap.S().Warnf("[sendPrivateMsgSync] 用户消息队列已满，消息可能延迟 userId=%d", userId)
 			// 队列满时，消息已保存到MySQL和Redis，用户可以后续拉取
 		}
 	} else {
 		// 用户不在线时，增加未读计数（Redis缓存）
+		ctx := context.Background()
+		targetIdStr := strconv.Itoa(int(userId))
 		unreadKey := models.UnreadCountPrefix + targetIdStr
 		if err := global.RedisDB.Incr(ctx, unreadKey).Err(); err != nil {
-			zap.S().Warnf("[sendMsgAndSave] Failed to increment unread count: %v", err)
+			zap.S().Warnf("[sendPrivateMsgSync] Failed to increment unread count: %v", err)
 			// 未读计数失败不影响主流程，可以考虑从MySQL统计
 		} else {
 			global.RedisDB.Expire(ctx, unreadKey, 30*24*time.Hour)
 		}
-		zap.S().Debugf("[sendMsgAndSave] 用户不在线，已增加未读计数 userId=%d, seq=%d", userId, jsonMsg.Seq)
+		zap.S().Debugf("[sendPrivateMsgSync] 用户不在线，已增加未读计数 userId=%d", userId)
 	}
 }
 
