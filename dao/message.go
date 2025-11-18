@@ -241,21 +241,15 @@ func (m *MessageDAO) Chat(w http.ResponseWriter, r *http.Request) {
 	// 直接发送，不通过sendMsg（避免加入待确认列表）
 	node.DataQueue <- welcomeData
 
-	// 8. 等待任一协程结束
-	<-done
-
-	// 等待其他协程结束（设置超时）
-	timeout := time.After(5 * time.Second)
-	select {
-	case <-done:
-	case <-timeout:
-		zap.S().Warn("协程清理超时: ", userId)
-	}
-
-	// 确保所有协程都结束
-	select {
-	case <-done:
-	default:
+	// 8. 等待所有协程结束，避免在关闭 DataQueue 后仍有协程写入导致 panic
+	for i := 0; i < 3; i++ {
+		timeout := time.After(5 * time.Second)
+		select {
+		case <-done:
+			// 正常退出
+		case <-timeout:
+			zap.S().Warnf("协程清理超时 userId=%d idx=%d", userId, i)
+		}
 	}
 }
 

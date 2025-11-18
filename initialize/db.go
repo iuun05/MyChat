@@ -42,6 +42,17 @@ func InitDB() {
 		panic(err)
 	}
 
+	// 配置数据库连接池，避免在高并发下频繁建连导致延迟抖动
+	sqlDB, err := global.DB.DB()
+	if err != nil {
+		zap.S().Error("get sql.DB from gorm failed", zap.Error(err))
+		panic(err)
+	}
+	// 根据你本机 MySQL 能力适当调节
+	sqlDB.SetMaxOpenConns(100)                 // 最大连接数
+	sqlDB.SetMaxIdleConns(50)                  // 最大空闲连接数
+	sqlDB.SetConnMaxLifetime(30 * time.Minute) // 连接最长存活时间
+
 	// 自动迁移数据库表结构，确保表结构与模型定义一致
 	err = global.DB.AutoMigrate(
 		&models.UserBasic{},

@@ -74,8 +74,13 @@ func (u *UserDAO) FindUserByNameAndPwd(name string, password string) (*models.Us
 	// MD5
 	temp := common.Md5encoder(t)
 
-	if tx := global.DB.Model(&user).Where("id = ?", user.ID).Update("identity", temp); tx.RowsAffected == 0 {
-		return nil, errors.New("写入 identity 失败")
+	// if tx := global.DB.Model(&user).Where("id = ?", user.ID).Update("identity", temp); tx.RowsAffected == 0 {
+	// 	return nil, errors.New("写入 identity 失败")
+	// }
+
+	tx := global.DB.Model(&user).Where("id = ?", user.ID).Update("identity", temp)
+	if tx.Error != nil {
+		return nil, tx.Error
 	}
 
 	// after login in the system, set user id in cache

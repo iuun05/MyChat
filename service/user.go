@@ -112,10 +112,6 @@ func LoginByNameAndPassWord(ctx *gin.Context) {
 		return
 	}
 
-	if err := getRedisCache().SetUserOnline(Rsp.ID, "online"); err != nil {
-		zap.S().Warn("[LoginByNameAndPassWord/service/user] Failed to set user online status ", err)
-	}
-
 	common.Success(ctx, gin.H{
 		"tokens": token,
 		"userId": Rsp.ID,

@@ -9,8 +9,10 @@ import (
 )
 
 func Router() *gin.Engine {
-	//初始化路由
-	// 使用gin.New()代替gin.Default()，以便自定义Recovery中间件
+	// 使用 Release 模式减少日志和调试开销（对性能测试更友好）
+	gin.SetMode(gin.ReleaseMode)
+
+	//初始化路由，使用gin.New()代替gin.Default()，以便自定义Recovery中间件
 	router := gin.New()
 
 	// 自定义Recovery中间件，不输出堆栈信息
@@ -20,8 +22,8 @@ func Router() *gin.Engine {
 		c.AbortWithStatus(500)
 	}))
 
-	// 使用自定义Logger中间件（可选，如果不需要可以注释掉）
-	router.Use(gin.Logger())
+	// 使用自定义Logger中间件（可选，高并发压测时可考虑关闭以降低日志 IO 开销）
+	// router.Use(gin.Logger())
 
 	// 健康检查端点
 	router.GET("/health", func(c *gin.Context) {
