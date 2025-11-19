@@ -26,7 +26,7 @@ const (
 type Message struct {
 	Model
 	MessageId string `json:"messageId,omitempty"` // 全局唯一消息ID（新增）
-	FromId    int64  `json:"userId"`              //信息发送者
+	FromId    int64  `json:"fromId"`              //信息发送者
 	TargetId  int64  `json:"targetId"`            //信息接收者
 	Seq       int64  `json:"seq"`                 //消息序号
 	Type      int    //聊天类型：群聊 私聊 广播

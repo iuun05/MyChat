@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -21,10 +22,17 @@ import (
 
 // MessageDAO 消息数据访问对象
 type MessageDAO struct {
-	clientMap     map[int64]*models.Node // 用户连接映射（WebSocket）
-	rwLocker      sync.RWMutex           // 读写锁
-	shardDAO      *MessageShardDAO       // 分表DAO
-	kafkaProducer *kafka.MessageProducer // Kafka生产者
+	clientMap            map[int64]*models.Node // 用户连接映射（WebSocket）
+	rwLocker             sync.RWMutex           // 读写锁
+	shardDAO             *MessageShardDAO       // 分表DAO
+	kafkaProducer        *kafka.MessageProducer // Kafka生产者
+	clusterEnabled       bool
+	nodeID               string
+	clusterChannelPrefix string
+	clusterUserKeyPrefix string
+	clusterBindingTTL    time.Duration
+	clusterCtx           context.Context
+	clusterCancel        context.CancelFunc
 }
 
 // GetShardDAODirect 获取分表DAO（供内部使用，返回具体类型）
@@ -50,8 +58,52 @@ func NewMessageDAO() *MessageDAO {
 			shardDAO:      NewMessageShardDAO(),
 			kafkaProducer: kafka.GetDefaultProducer(), // 获取Kafka生产者（可能为nil，如果未初始化）
 		}
+		defaultMessageDAO.initCluster()
 	}
 	return defaultMessageDAO
+}
+
+func (m *MessageDAO) initCluster() {
+	cfg := global.ServiceConfig
+	if cfg == nil || !cfg.Cluster.Enabled {
+		return
+	}
+
+	if global.RedisDB == nil {
+		zap.S().Warn("[MessageDAO] cluster mode enabled but Redis is not initialized")
+		return
+	}
+
+	m.clusterEnabled = true
+	m.nodeID = cfg.Cluster.NodeID
+	if m.nodeID == "" {
+		if host, err := os.Hostname(); err == nil {
+			m.nodeID = host
+		} else {
+			m.nodeID = fmt.Sprintf("node-%d", time.Now().UnixNano())
+		}
+	}
+
+	m.clusterChannelPrefix = cfg.Cluster.ChannelPrefix
+	if m.clusterChannelPrefix == "" {
+		m.clusterChannelPrefix = clusterDefaultChannelPrefix
+	}
+
+	m.clusterUserKeyPrefix = cfg.Cluster.UserNodePrefix
+	if m.clusterUserKeyPrefix == "" {
+		m.clusterUserKeyPrefix = clusterDefaultUserKeyPrefix
+	}
+
+	if cfg.Cluster.BindingTTLSeconds > 0 {
+		m.clusterBindingTTL = time.Duration(cfg.Cluster.BindingTTLSeconds) * time.Second
+	} else {
+		m.clusterBindingTTL = clusterDefaultBindingTTL
+	}
+
+	m.clusterCtx, m.clusterCancel = context.WithCancel(context.Background())
+	go m.startClusterSubscriber()
+
+	zap.S().Infof("[MessageDAO] cluster mode enabled, nodeID=%s channelPrefix=%s", m.nodeID, m.clusterChannelPrefix)
 }
 
 // SetKafkaProducer 设置Kafka生产者
@@ -65,7 +117,16 @@ const (
 	HeartbeatTimeout  = 90 * time.Second // 心跳超时时间
 	MaxRetryCount     = 3                // 最大重试次数
 	RetryInterval     = 5 * time.Second  // 重试间隔
+
+	clusterDefaultChannelPrefix = "cluster:ws:node:"
+	clusterDefaultUserKeyPrefix = "cluster:user_node:"
+	clusterDefaultBindingTTL    = 120 * time.Second
 )
+
+type clusterMessageEnvelope struct {
+	UserId int64  `json:"userId"`
+	Data   []byte `json:"data"`
+}
 
 // generateSeq 为Node生成唯一消息序号（每个Node独立）
 func (m *MessageDAO) generateSeq(node *models.Node) int64 {
@@ -160,6 +221,10 @@ func (m *MessageDAO) Chat(w http.ResponseWriter, r *http.Request) {
 	m.clientMap[userId] = node
 	m.rwLocker.Unlock()
 
+	if m.clusterEnabled {
+		m.bindUserToNode(userId)
+	}
+
 	// clear unread message count
 	cctx := context.Background()
 	if err := m.ClearUnreadCount(cctx, userId); err != nil {
@@ -173,6 +238,8 @@ func (m *MessageDAO) Chat(w http.ResponseWriter, r *http.Request) {
 			delete(m.clientMap, userId)
 		}
 		m.rwLocker.Unlock()
+
+		m.unbindUserFromNode(userId)
 
 		// 停止心跳定时器
 		if node.HeartbeatTicker != nil {
@@ -305,16 +372,7 @@ func (m *MessageDAO) sendProc(node *models.Node, userId int64) {
 				continue
 			} else if msg.Type == models.AckMessageType {
 				if msg.TargetId == userId || msg.TargetId == 0 {
-					// 这是发给当前用户的ACK（接收方发来的确认），从待确认列表中移除
-					node.SeqMutex.Lock()
-					if _, exists := node.PendingMsgs[msg.Seq]; exists {
-						delete(node.PendingMsgs, msg.Seq)
-						zap.S().Debugf("收到ACK确认，移除待确认消息 seq=%d, userId=%d", msg.Seq, userId)
-					} else {
-						zap.S().Debugf("收到ACK确认，但对应的消息不在待确认列表中 seq=%d, userId=%d", msg.Seq, userId)
-					}
-					node.SeqMutex.Unlock()
-
+					// 这是发给当前用户的ACK，直接推送给客户端
 					if err := node.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
 						zap.S().Error("发送ACK给客户端失败", zap.Error(err))
 					} else {
@@ -474,6 +532,15 @@ func (m *MessageDAO) recProc(node *models.Node, userId int64) {
 				zap.S().Warn("心跳响应队列已满")
 			}
 		} else if msg.Type == models.AckMessageType {
+			if msg.Seq > 0 {
+				node.SeqMutex.Lock()
+				if _, exists := node.PendingMsgs[msg.Seq]; exists {
+					delete(node.PendingMsgs, msg.Seq)
+					zap.S().Debugf("收到客户端ACK，移除待确认消息 seq=%d, userId=%d", msg.Seq, userId)
+				}
+				node.SeqMutex.Unlock()
+			}
+
 			select {
 			case node.DataQueue <- data:
 				zap.S().Debugf("ACK消息已放入队列等待路由 seq=%d", msg.Seq)
@@ -640,6 +707,8 @@ func (m *MessageDAO) heartbeatProc(node *models.Node, userId int64) {
 			default:
 				zap.S().Warn("心跳消息队列已满")
 			}
+
+			m.refreshUserNodeBinding(userId)
 
 		case <-timeoutTicker.C:
 			// 检查心跳超时
@@ -851,7 +920,7 @@ func (m *MessageDAO) sendMsgAndSave(userId int64, msg []byte) {
 
 	// 单聊消息：优先使用Kafka消息队列（异步推送）
 	if jsonMsg.Type == models.SingleMessageType && m.kafkaProducer != nil {
-		// 发送到Kafka队列，立即返回（不等待推送完成）
+		// 发送到Kafka队列
 		if err := m.kafkaProducer.SendPrivateChatMessage(
 			jsonMsg.FromId,
 			userId,
@@ -865,6 +934,8 @@ func (m *MessageDAO) sendMsgAndSave(userId int64, msg []byte) {
 		} else {
 			zap.S().Debugf("[sendMsgAndSave] 单聊消息已保存并发送到Kafka fromId=%d, toId=%d, seq=%d, messageId=%s",
 				jsonMsg.FromId, userId, jsonMsg.Seq, messageId)
+			// 即使Kafka发送成功，也同步推送一次，确保本节点实时送达（Kafka消费者可能未启动）
+			m.sendPrivateMsgSync(userId, msg)
 		}
 		return
 	}
@@ -1072,9 +1143,31 @@ func (m *MessageDAO) PushMessageToUser(userId int64, msg []byte) {
 
 // pushMessageToUser 推送消息给用户（不保存）
 func (m *MessageDAO) pushMessageToUser(userId int64, msg []byte) {
+	if m.clusterEnabled {
+		if m.isLocalUser(userId) {
+			m.pushMessageToLocal(userId, msg)
+			return
+		}
+
+		if nodeID, err := m.getUserNodeBinding(userId); err == nil && nodeID != "" {
+			if nodeID == m.nodeID {
+				m.pushMessageToLocal(userId, msg)
+				return
+			}
+			if err := m.publishClusterMessage(nodeID, userId, msg); err == nil {
+				zap.S().Debugf("[pushMessageToUser] 消息已转发到节点 %s userId=%d", nodeID, userId)
+				return
+			}
+			zap.S().Warnf("[pushMessageToUser] 转发消息失败 node=%s userId=%d err=%v", nodeID, userId, err)
+		}
+	}
+
+	m.pushMessageToLocal(userId, msg)
+}
+
+func (m *MessageDAO) pushMessageToLocal(userId int64, msg []byte) {
 	ctx := context.Background()
 
-	// 更新Redis缓存
 	var jsonMsg models.Message
 	if err := json.Unmarshal(msg, &jsonMsg); err != nil {
 		return
@@ -1083,19 +1176,21 @@ func (m *MessageDAO) pushMessageToUser(userId int64, msg []byte) {
 	targetIdStr := strconv.Itoa(int(userId))
 	userIdStr := strconv.Itoa(int(jsonMsg.FromId))
 
-	var key string
-	if userId > jsonMsg.FromId {
-		key = "msg_" + userIdStr + "_" + targetIdStr
-	} else {
-		key = "msg_" + targetIdStr + "_" + userIdStr
+	if jsonMsg.MessageId == "" {
+		var key string
+		if userId > jsonMsg.FromId {
+			key = "msg_" + userIdStr + "_" + targetIdStr
+		} else {
+			key = "msg_" + targetIdStr + "_" + userIdStr
+		}
+
+		score := float64(time.Now().Unix())
+		memberKey := string(msg)
+		if err := global.RedisDB.ZAdd(ctx, key, redis.Z{Score: score, Member: memberKey}).Err(); err != nil {
+			zap.S().Warnf("[pushMessageToLocal] 写入Redis失败 userId=%d, err=%v", userId, err)
+		}
 	}
 
-	// 更新Redis缓存
-	score := float64(time.Now().Unix())
-	memberKey := string(msg)
-	global.RedisDB.ZAdd(ctx, key, redis.Z{Score: score, Member: memberKey})
-
-	// 发送消息到WebSocket队列
 	m.rwLocker.RLock()
 	node, ok := m.clientMap[userId]
 	m.rwLocker.RUnlock()
@@ -1103,16 +1198,116 @@ func (m *MessageDAO) pushMessageToUser(userId int64, msg []byte) {
 	if ok {
 		select {
 		case node.DataQueue <- msg:
-			zap.S().Debugf("[pushMessageToUser] 消息已放入WebSocket队列 userId=%d, seq=%d", userId, jsonMsg.Seq)
+			zap.S().Debugf("[pushMessageToLocal] 消息已放入WebSocket队列 userId=%d, seq=%d", userId, jsonMsg.Seq)
 		default:
-			zap.S().Warnf("[pushMessageToUser] 用户消息队列已满 userId=%d, seq=%d", userId, jsonMsg.Seq)
+			zap.S().Warnf("[pushMessageToLocal] 用户消息队列已满 userId=%d, seq=%d", userId, jsonMsg.Seq)
 		}
 	} else {
-		// 用户不在线，增加未读计数
 		unreadKey := models.UnreadCountPrefix + targetIdStr
 		global.RedisDB.Incr(ctx, unreadKey)
 		global.RedisDB.Expire(ctx, unreadKey, 30*24*time.Hour)
 	}
+}
+
+func (m *MessageDAO) isLocalUser(userId int64) bool {
+	m.rwLocker.RLock()
+	defer m.rwLocker.RUnlock()
+	_, ok := m.clientMap[userId]
+	return ok
+}
+
+func (m *MessageDAO) clusterUserKey(userId int64) string {
+	prefix := m.clusterUserKeyPrefix
+	if prefix == "" {
+		prefix = clusterDefaultUserKeyPrefix
+	}
+	return fmt.Sprintf("%s%d", prefix, userId)
+}
+
+func (m *MessageDAO) clusterChannelName(nodeID string) string {
+	prefix := m.clusterChannelPrefix
+	if prefix == "" {
+		prefix = clusterDefaultChannelPrefix
+	}
+	return prefix + nodeID
+}
+
+func (m *MessageDAO) bindUserToNode(userId int64) {
+	if !m.clusterEnabled || global.RedisDB == nil {
+		return
+	}
+	if err := global.RedisDB.Set(context.Background(), m.clusterUserKey(userId), m.nodeID, m.clusterBindingTTL).Err(); err != nil {
+		zap.S().Warnf("[cluster] 绑定用户到节点失败 userId=%d node=%s err=%v", userId, m.nodeID, err)
+	}
+}
+
+func (m *MessageDAO) refreshUserNodeBinding(userId int64) {
+	if !m.clusterEnabled || global.RedisDB == nil {
+		return
+	}
+	if err := global.RedisDB.Expire(context.Background(), m.clusterUserKey(userId), m.clusterBindingTTL).Err(); err != nil {
+		zap.S().Debugf("[cluster] 刷新用户节点绑定失败 userId=%d err=%v", userId, err)
+	}
+}
+
+func (m *MessageDAO) unbindUserFromNode(userId int64) {
+	if !m.clusterEnabled || global.RedisDB == nil {
+		return
+	}
+	if err := global.RedisDB.Del(context.Background(), m.clusterUserKey(userId)).Err(); err != nil {
+		zap.S().Debugf("[cluster] 删除用户节点绑定失败 userId=%d err=%v", userId, err)
+	}
+}
+
+func (m *MessageDAO) getUserNodeBinding(userId int64) (string, error) {
+	if !m.clusterEnabled || global.RedisDB == nil {
+		return "", nil
+	}
+	return global.RedisDB.Get(context.Background(), m.clusterUserKey(userId)).Result()
+}
+
+func (m *MessageDAO) publishClusterMessage(nodeID string, userId int64, msg []byte) error {
+	if global.RedisDB == nil {
+		return fmt.Errorf("redis not initialized")
+	}
+	payload, err := json.Marshal(clusterMessageEnvelope{
+		UserId: userId,
+		Data:   msg,
+	})
+	if err != nil {
+		return err
+	}
+	return global.RedisDB.Publish(context.Background(), m.clusterChannelName(nodeID), payload).Err()
+}
+
+func (m *MessageDAO) startClusterSubscriber() {
+	if !m.clusterEnabled || global.RedisDB == nil || m.clusterCtx == nil {
+		return
+	}
+
+	channel := m.clusterChannelName(m.nodeID)
+	pubsub := global.RedisDB.Subscribe(m.clusterCtx, channel)
+
+	go func() {
+		for {
+			msg, err := pubsub.ReceiveMessage(m.clusterCtx)
+			if err != nil {
+				if m.clusterCtx.Err() != nil {
+					return
+				}
+				zap.S().Warnf("[cluster] 订阅消息失败 err=%v", err)
+				time.Sleep(time.Second)
+				continue
+			}
+
+			var envelope clusterMessageEnvelope
+			if err := json.Unmarshal([]byte(msg.Payload), &envelope); err != nil {
+				zap.S().Warnf("[cluster] 解析跨节点消息失败 err=%v", err)
+				continue
+			}
+			m.pushMessageToLocal(envelope.UserId, envelope.Data)
+		}
+	}()
 }
 
 // ReadRedisMsg 获取缓存里面的聊天记录

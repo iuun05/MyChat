@@ -24,10 +24,19 @@ type KafkaConfig struct {
 	PrivateWorkerCount int      `mapstructure:"private_worker_count" json:"private_worker_count"` // 单聊消费者worker数量
 }
 
+type ClusterConfig struct {
+	Enabled           bool   `mapstructure:"enabled" json:"enabled"`
+	NodeID            string `mapstructure:"node_id" json:"node_id"`
+	ChannelPrefix     string `mapstructure:"channel_prefix" json:"channel_prefix"`
+	UserNodePrefix    string `mapstructure:"user_node_prefix" json:"user_node_prefix"`
+	BindingTTLSeconds int    `mapstructure:"binding_ttl_seconds" json:"binding_ttl_seconds"`
+}
+
 type ServiceConfig struct {
-	Port     int         `mapstructure:"port" json:"port"`
-	GRPCPort int         `mapstructure:"grpc_port" json:"grpc_port"`
-	DB       MysqlConfig `mapstructure:"mysql" json:"mysql"`
-	RedisDB  RedisConfig `mapstructure:"redis" json:"redis"`
-	Kafka    KafkaConfig `mapstructure:"kafka" json:"kafka"`
+	Port     int           `mapstructure:"port" json:"port"`
+	GRPCPort int           `mapstructure:"grpc_port" json:"grpc_port"`
+	DB       MysqlConfig   `mapstructure:"mysql" json:"mysql"`
+	RedisDB  RedisConfig   `mapstructure:"redis" json:"redis"`
+	Kafka    KafkaConfig   `mapstructure:"kafka" json:"kafka"`
+	Cluster  ClusterConfig `mapstructure:"cluster" json:"cluster"`
 }
